@@ -1,47 +1,26 @@
-import { blob } from 'hub:blob'
-import { db, schema } from 'hub:db'
-import { and, eq } from 'drizzle-orm'
-import { z } from 'zod'
+import { defineEventHandler, getValidatedRouterParams } from 'h3';
+import { and, eq } from 'drizzle-orm';
+import { z } from 'zod';
+import { db, schema } from '../../utils/db';
+import { getUserSession } from '../../utils/auth';
+import { dropCopilotSession } from '../../utils/copilot';
+
+// NOTE: Original implementation also deleted blob files for the chat.
+// Blob/file-upload code paths have been disabled in this fork — see
+// server/api/upload/* — so the blob cleanup has been removed.
 
 export default defineEventHandler(async (event) => {
-  const session = await getUserSession(event)
-  const { id } = await getValidatedRouterParams(event, z.object({
-    id: z.string()
-  }).parse)
+  const session = await getUserSession(event);
+  const { id } = await getValidatedRouterParams(event, z.object({ id: z.string() }).parse);
 
-  const chat = await db.query.chats.findFirst({
-    where: () => and(eq(schema.chats.id, id as string), eq(schema.chats.userId, session.user?.id || session.id))
-  })
+  const userId = session.user?.id || session.id;
 
-  if (!chat) {
-    throw createError({
-      statusCode: 404,
-      statusMessage: 'Chat not found'
-    })
-  }
+  const result = await db().delete(schema.chats)
+    .where(and(eq(schema.chats.id, id), eq(schema.chats.userId, userId)))
+    .returning();
 
-  const username = session.user?.username || session.id
-  const chatFolder = `${username}/${id}`
+  // Best-effort drop of the Copilot session associated with this chat.
+  await dropCopilotSession(id);
 
-  try {
-    const { blobs } = await blob.list({
-      prefix: chatFolder
-    })
-
-    if (blobs.length > 0) {
-      await Promise.all(
-        blobs.map(b =>
-          blob.del(b.pathname).catch(error =>
-            console.error('[delete-chat] Failed to delete file:', b.pathname, error)
-          )
-        )
-      )
-    }
-  } catch (error) {
-    console.error('Failed to list/delete chat files:', error)
-  }
-
-  return await db.delete(schema.chats)
-    .where(and(eq(schema.chats.id, id as string), eq(schema.chats.userId, session.user?.id || session.id)))
-    .returning()
-})
+  return result;
+});

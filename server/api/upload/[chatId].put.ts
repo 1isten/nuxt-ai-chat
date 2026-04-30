@@ -1,3 +1,19 @@
+// Blob/file-upload feature is disabled in this fork.
+// The original implementation used `hub:blob` (NuxtHub Blob) — see the
+// project README for the full original code. To re-enable, restore the
+// nuxt-auth-utils + @nuxthub/core wiring and the original blob handler.
+//
+// Returning 501 keeps the route discoverable while clearly signalling
+// "not implemented" to the frontend (the frontend only calls /api/upload/*
+// when the user is logged in, which never happens with the current auth stub).
+
+import { defineEventHandler, createError } from 'h3';
+
+export default defineEventHandler(() => {
+  throw createError({ statusCode: 501, statusMessage: 'File uploads are disabled' });
+});
+
+/* Original implementation (preserved for reference):
 import { blob } from 'hub:blob'
 import { db, schema } from 'hub:db'
 import { eq } from 'drizzle-orm'
@@ -38,3 +54,4 @@ export default defineEventHandler(async (event) => {
     }
   })
 })
+*/
