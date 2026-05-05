@@ -6,6 +6,22 @@
 // the README and `examples/standalone-server.js`.
 export default defineNuxtConfig({
   // Static SPA: no SSR. `nuxt generate` produces a deployable static bundle.
+  ssr: false,
+  ...(process.env.PACK_ENV === 'electron' ? {
+    app: {
+      baseURL: '.',
+      // buildAssetsDir: '/assets/',
+    },
+    router: {
+      options: {
+        hashMode: true,
+      },
+    },
+  } : {
+    devServer: {
+      port: 18041,
+    },
+  }),
 
   modules: [
     '@nuxt/eslint',
@@ -17,7 +33,6 @@ export default defineNuxtConfig({
     'nuxt-charts',
     'nuxt-csurf',
   ],
-  ssr: false,
 
   devtools: {
     enabled: false,

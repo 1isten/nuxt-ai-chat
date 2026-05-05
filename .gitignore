@@ -8,6 +8,7 @@ dist
 
 # Node dependencies
 node_modules
+test/node_modules
 
 # Logs
 logs

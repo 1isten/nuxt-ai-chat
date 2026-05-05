@@ -37,6 +37,19 @@ export interface CopilotRuntimeConfig {
   gitHubToken?: string;
   /** Default to using the user logged into the local `copilot` CLI. */
   useLoggedInUser: boolean;
+  /**
+   * Environment variables for the spawned Copilot CLI subprocess only.
+   * Defaults to `process.env`. Hosts (e.g. Electron) can override this to
+   * inject vars like `ELECTRON_RUN_AS_NODE=1` without polluting the parent
+   * process env (which would break Electron's own helper children).
+   */
+  env?: NodeJS.ProcessEnv;
+  /**
+   * Optional override for the path to the Copilot CLI entrypoint. Hosts
+   * (e.g. Electron) can point this at a shim that prepares the runtime
+   * environment before importing `@github/copilot`.
+   */
+  cliPath?: string;
 }
 
 let _config: CopilotRuntimeConfig = {
@@ -69,6 +82,8 @@ export async function getCopilotClient(): Promise<CopilotClient> {
     const client = new CopilotClient({
       ...(cfg.gitHubToken ? { gitHubToken: cfg.gitHubToken } : {}),
       useLoggedInUser: cfg.useLoggedInUser && !cfg.gitHubToken,
+      ...(cfg.env ? { env: cfg.env } : {}),
+      ...(cfg.cliPath ? { cliPath: cfg.cliPath } : {}),
     });
     await client.start();
     _client = client;

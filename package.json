@@ -12,10 +12,12 @@
     "typecheck": "nuxt typecheck",
     "db:generate": "drizzle-kit generate --config=drizzle.config.ts",
     "db:migrate": "drizzle-kit migrate --config=drizzle.config.ts",
-    "server:generate": "esbuild server/index.ts --format=esm --platform=node --target=node20 --packages=external --bundle --minify --allow-overwrite --outfile=server/index.min.js",
+    "server:generate": "esbuild server/index.ts --format=esm --platform=node --target=node20 --packages=external --bundle --allow-overwrite --outfile=server/index.min.js",
     "prepackage": "shx rm -rf dist && shx rm -rf .output",
-    "package": "cross-env NUXT_PUBLIC_API_BASE=http://localhost:18040 npm-run-all2 -s server:generate generate",
-    "postpackage": "shx rm .output/nitro.json && shx mv .output/public .output/client && shx mkdir -p .output/server/db && shx cp server/index.min.js .output/server/index.js && shx cp -r server/db/migrations .output/server/db/migrations && shx mkdir .output/.github && shx cp -r .github/skills .output/.github/skills && shx mkdir .output/.data && shx cp -r test .output/test && shx mv .output/test/package.json .output/package.json && shx mv .output/test/README.md .output/README.md"
+    "package": "npm-run-all2 -s server:generate generate",
+    "package:test": "cross-env NUXT_PUBLIC_API_BASE=http://localhost:18040 pnpm run package && cd .output && npm install && cd ..",
+    "package:electron": "cross-env PACK_ENV=electron NUXT_PUBLIC_API_BASE=h3://localhost pnpm run package && cd .output && npm ci --omit=dev && cd ..",
+    "postpackage": "shx rm .output/nitro.json && shx mv .output/public .output/client && shx mkdir -p .output/server/db && shx cp server/index.min.js .output/server/index.js && shx cp -r server/db/migrations .output/server/db/migrations && shx mkdir .output/.github && shx cp -r .github/skills .output/.github/skills && shx mkdir .output/.data && shx cp -r test .output/test && shx mv .output/test/package.json .output/package.json && shx mv .output/test/package-lock.json .output/package-lock.json && shx mv .output/test/README.md .output/README.md"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.74",
