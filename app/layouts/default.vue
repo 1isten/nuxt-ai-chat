@@ -1,73 +1,73 @@
 <script setup lang="ts">
-import type { DropdownMenuItem } from '@nuxt/ui'
+import type { DropdownMenuItem } from '@nuxt/ui';
 
-const { loggedIn, openInPopup } = useUserSession()
-const { renameChat, deleteChat } = useChatActions()
+const { loggedIn, openInPopup } = useUserSession();
+const { renameChat, deleteChat } = useChatActions();
 
-const sidebarOpen = ref(false)
-const searchOpen = ref(false)
+const sidebarOpen = ref(false);
+const searchOpen = ref(false);
 
 const { data: chats, refresh: refreshChats } = await useFetch('/api/chats', {
   key: 'chats',
-  transform: data => data.map(chat => ({
+  transform: (data) => data.map((chat) => ({
     id: chat.id,
-    label: chat.title || 'Untitled',
+    label: chat.title || 'Untitled chat',
     to: `/chat/${chat.id}`,
     icon: 'i-lucide-message-circle',
-    createdAt: chat.createdAt
-  }))
-})
+    createdAt: chat.createdAt,
+  })),
+});
 
 onNuxtReady(async () => {
-  const first10 = (chats.value || []).slice(0, 10)
+  const first10 = (chats.value || []).slice(0, 10);
   for (const chat of first10) {
     // prefetch the chat and let the browser cache it
-    await $fetch(`/api/chats/${chat.id}`)
+    await $fetch(`/api/chats/${chat.id}`);
   }
-})
+});
 
 watch(loggedIn, () => {
-  refreshChats()
+  refreshChats();
 
-  sidebarOpen.value = false
-})
+  sidebarOpen.value = false;
+});
 
-const { groups } = useChats(chats)
+const { groups } = useChats(chats);
 
 const items = computed(() => groups.value?.flatMap((group) => {
   return [{
     label: group.label,
-    type: 'label' as const
-  }, ...group.items.map(item => ({
+    type: 'label' as const,
+  }, ...group.items.map((item) => ({
     ...item,
     slot: 'chat' as const,
     icon: undefined,
-    class: item.label === 'Untitled' ? 'text-muted' : ''
-  }))]
-}))
+    class: item.label === 'Untitled chat' ? 'text-muted' : '',
+  }))];
+}));
 
-function getChatActions(item: { id: string, label: string }): DropdownMenuItem[][] {
+function getChatActions(item: { id: string; label: string }): DropdownMenuItem[][] {
   return [[
     {
       label: 'Rename',
       icon: 'i-lucide-pencil',
-      onSelect: () => renameChat(item.id, item.label === 'Untitled' ? '' : item.label)
-    }
+      onSelect: () => renameChat(item.id, item.label === 'Untitled chat' ? '' : item.label),
+    },
   ], [
     {
       label: 'Delete',
       icon: 'i-lucide-trash',
       color: 'error' as const,
-      onSelect: () => deleteChat(item.id)
-    }
-  ]]
+      onSelect: () => deleteChat(item.id),
+    },
+  ]];
 }
 
 defineShortcuts({
   meta_o: () => {
-    navigateTo('/')
-  }
-})
+    navigateTo('/');
+  },
+});
 </script>
 
 <template>
@@ -84,7 +84,7 @@ defineShortcuts({
       <template #header="{ collapsed }">
         <NuxtLink v-if="!collapsed" to="/" class="flex items-end gap-0.5">
           <Logo class="h-8 w-auto shrink-0" />
-          <span class="text-xl font-bold text-highlighted">Chat</span>
+          <span class="text-xl font-bold text-highlighted">Chatbot</span>
         </NuxtLink>
 
         <UDashboardSidebarCollapse class="ms-auto" />
@@ -96,14 +96,14 @@ defineShortcuts({
             label: 'New chat',
             to: '/',
             kbds: ['meta', 'o'],
-            icon: 'i-lucide-circle-plus'
+            icon: 'i-lucide-circle-plus',
           }, {
             label: 'Search',
             icon: 'i-lucide-search',
             kbds: ['meta', 'k'],
             onSelect: () => {
               searchOpen = true
-            }
+            },
           }]"
           :collapsed="collapsed"
           orientation="vertical"
@@ -129,7 +129,7 @@ defineShortcuts({
           orientation="vertical"
           :ui="{
             link: 'overflow-hidden pr-7.5',
-            linkTrailing: 'translate-x-full group-hover:translate-x-0 group-has-data-[state=open]:translate-x-0 transition-transform ms-0 absolute inset-e-px'
+            linkTrailing: 'translate-x-full group-hover:translate-x-0 group-has-data-[state=open]:translate-x-0 transition-transform ms-0 absolute inset-e-px',
           }"
         >
           <template #chat-trailing="{ item }">
@@ -154,9 +154,9 @@ defineShortcuts({
       </template>
 
       <template #footer="{ collapsed }">
-        <UserMenu v-if="loggedIn" :collapsed="collapsed" />
+        <UserMenu v-if="false && loggedIn" :collapsed="collapsed" />
         <UButton
-          v-else
+          v-else-if="false"
           :label="collapsed ? '' : 'Login with GitHub'"
           icon="i-simple-icons-github"
           color="neutral"
@@ -170,14 +170,15 @@ defineShortcuts({
     <UDashboardSearch
       v-model:open="searchOpen"
       placeholder="Search chats..."
+      :color-mode="false"
       :groups="[{
         id: 'links',
         items: [{
           label: 'New chat',
           to: '/',
           icon: 'i-lucide-circle-plus',
-          kbds: ['meta', 'o']
-        }]
+          kbds: ['meta', 'o'],
+        }],
       }, ...groups]"
     />
 

@@ -1,3 +1,10 @@
+// GitHub OAuth route disabled — auth is handled by a stub (server/utils/auth.ts).
+// Original implementation preserved below for reference.
+import { defineEventHandler, sendRedirect } from 'h3';
+
+export default defineEventHandler((event) => sendRedirect(event, '/'));
+
+/* Original implementation:
 import { db, schema } from 'hub:db'
 import { and, eq } from 'drizzle-orm'
 
@@ -32,9 +39,9 @@ export default defineOAuthGitHubEventHandler({
 
     return sendRedirect(event, '/')
   },
-  // Optional, will return a json error and 401 status code by default
   onError(event, error) {
     console.error('GitHub OAuth error:', error)
     return sendRedirect(event, '/')
   }
 })
+*/

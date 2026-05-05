@@ -1,30 +1,32 @@
-import type { UIMessage } from 'ai'
-import { db, schema } from 'hub:db'
-import { z } from 'zod'
+import { defineEventHandler, readValidatedBody, createError } from 'h3';
+import type { UIMessage } from 'ai';
+import { z } from 'zod';
+import { db, schema } from '../utils/db';
+import { getUserSession } from '../utils/auth';
 
 export default defineEventHandler(async (event) => {
-  const session = await getUserSession(event)
+  const session = await getUserSession(event);
   const { id, message } = await readValidatedBody(event, z.object({
     id: z.string(),
-    message: z.custom<UIMessage>()
-  }).parse)
+    message: z.custom<UIMessage>(),
+  }).parse);
 
-  const [chat] = await db.insert(schema.chats).values({
+  const [chat] = await db().insert(schema.chats).values({
     id,
     title: '',
-    userId: session.user?.id || session.id
-  }).returning()
+    userId: session.user?.id || session.id,
+  }).returning();
 
   if (!chat) {
-    throw createError({ statusCode: 500, statusMessage: 'Failed to create chat' })
+    throw createError({ statusCode: 500, statusMessage: 'Failed to create chat' });
   }
 
-  await db.insert(schema.messages).values({
+  await db().insert(schema.messages).values({
     id: message.id,
     chatId: chat.id,
     role: 'user',
-    parts: message.parts
-  })
+    parts: message.parts,
+  });
 
-  return chat
-})
+  return chat;
+});

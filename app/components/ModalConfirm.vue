@@ -1,11 +1,11 @@
 <script setup lang="ts">
 defineProps<{
-  title: string
-  description: string
-  color?: 'error' | 'warning' | 'info' | 'success'
-}>()
+  title: string;
+  description: string;
+  color?: 'error' | 'warning' | 'info' | 'success';
+}>();
 
-const emit = defineEmits<{ close: [boolean] }>()
+const emit = defineEmits<{ close: [boolean] }>();
 </script>
 
 <template>
@@ -13,7 +13,7 @@ const emit = defineEmits<{ close: [boolean] }>()
     :title="title"
     :description="description"
     :ui="{
-      footer: 'flex-row-reverse justify-start'
+      footer: 'flex-row-reverse justify-start',
     }"
     :close="false"
     :dismissible="false"

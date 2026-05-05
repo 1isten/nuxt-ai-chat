@@ -1,16 +1,21 @@
 {
-  "name": "nuxt-ui-template-chat",
-  "private": true,
+  "name": "nuxt-ai-chat",
   "type": "module",
   "scripts": {
-    "build": "nuxt build",
     "dev": "nuxt dev",
+    "build": "nuxt build",
+    "generate": "nuxt generate",
     "preview": "nuxt preview",
     "postinstall": "nuxt prepare",
     "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
     "typecheck": "nuxt typecheck",
-    "db:generate": "nuxt db generate",
-    "db:migrate": "nuxt db migrate"
+    "db:generate": "drizzle-kit generate --config=drizzle.config.ts",
+    "db:migrate": "drizzle-kit migrate --config=drizzle.config.ts",
+    "server:generate": "esbuild server/index.ts --format=esm --platform=node --target=node20 --packages=external --bundle --minify --allow-overwrite --outfile=server/index.min.js",
+    "prepackage": "shx rm -rf dist && shx rm -rf .output",
+    "package": "cross-env NUXT_PUBLIC_API_BASE=http://localhost:18040 npm-run-all2 -s server:generate generate",
+    "postpackage": "shx rm .output/nitro.json && shx mv .output/public .output/client && shx mkdir -p .output/server/db && shx cp server/index.min.js .output/server/index.js && shx cp -r server/db/migrations .output/server/db/migrations && shx mkdir .output/.github && shx cp -r .github/skills .output/.github/skills && shx mkdir .output/.data && shx cp -r test .output/test && shx mv .output/test/package.json .output/package.json && shx mv .output/test/README.md .output/README.md"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.74",
@@ -19,15 +24,19 @@
     "@ai-sdk/openai": "^3.0.58",
     "@ai-sdk/vue": "^3.0.174",
     "@comark/nuxt": "^0.3.1",
+    "@github/copilot-sdk": "^0.3.0",
     "@iconify-json/logos": "^1.2.11",
     "@iconify-json/lucide": "^1.2.105",
+    "@iconify-json/mdi": "^1.2.3",
     "@iconify-json/simple-icons": "^1.2.80",
     "@libsql/client": "^0.17.3",
     "@nuxt/ui": "^4.7.1",
     "@nuxthub/core": "^0.10.7",
     "@shikijs/langs": "^4.0.2",
     "@vercel/blob": "^2.3.3",
+    "@vueuse/components": "^14.3.0",
     "@vueuse/core": "^14.3.0",
+    "@vueuse/nuxt": "^14.3.0",
     "ai": "^6.0.174",
     "date-fns": "^4.1.0",
     "drizzle-orm": "^0.45.2",
@@ -44,10 +53,15 @@
   "devDependencies": {
     "@nuxt/eslint": "^1.15.2",
     "@types/node": "^24.12.2",
+    "cross-env": "^10.1.0",
     "drizzle-kit": "^0.31.10",
     "eslint": "^10.3.0",
+    "esbuild": "^0.28.0",
+    "npm-run-all2": "^8.0.4",
+    "shx": "^0.4.0",
+    "tsx": "^4.21.0",
     "typescript": "^6.0.3",
     "vue-tsc": "^3.2.8"
   },
-  "packageManager": "pnpm@10.33.2"
+  "packageManager": "pnpm@10.33.3"
 }
