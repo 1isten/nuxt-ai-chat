@@ -2,6 +2,7 @@ CREATE TABLE `chats` (
 	`id` text PRIMARY KEY NOT NULL,
 	`title` text,
 	`user_id` text NOT NULL,
+	`visibility` text DEFAULT 'private' NOT NULL,
 	`created_at` integer NOT NULL
 );
 --> statement-breakpoint
@@ -27,4 +28,12 @@ CREATE TABLE `users` (
 	`created_at` integer NOT NULL
 );
 --> statement-breakpoint
-CREATE UNIQUE INDEX `users_provider_id_idx` ON `users` (`provider`,`provider_id`);
+CREATE UNIQUE INDEX `users_provider_id_idx` ON `users` (`provider`,`provider_id`);--> statement-breakpoint
+CREATE TABLE `votes` (
+	`chat_id` text NOT NULL,
+	`message_id` text NOT NULL,
+	`is_upvoted` integer NOT NULL,
+	PRIMARY KEY(`chat_id`, `message_id`),
+	FOREIGN KEY (`chat_id`) REFERENCES `chats`(`id`) ON UPDATE no action ON DELETE cascade,
+	FOREIGN KEY (`message_id`) REFERENCES `messages`(`id`) ON UPDATE no action ON DELETE cascade
+);

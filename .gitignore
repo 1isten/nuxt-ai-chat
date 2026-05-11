@@ -8,6 +8,7 @@ dist
 
 # Node dependencies
 node_modules
+test/node_modules
 
 # Logs
 logs
@@ -27,3 +28,14 @@ logs
 .history
 .vercel
 .env*.local
+
+# Ignore all skills except the committed ones
+.github/skills/*
+!.github/skills/openspec-apply-change/
+!.github/skills/openspec-archive-change/
+!.github/skills/openspec-explore/
+!.github/skills/openspec-propose/
+!.github/skills/propose-first/
+
+# esbuild server bundle
+server/index.min.js

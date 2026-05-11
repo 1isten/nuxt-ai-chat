@@ -1,106 +1,106 @@
-import { LazyModalConfirm, LazyModalRename } from '#components'
+import { LazyModalConfirm, LazyModalRename } from '#components';
 
 interface ChatListItem {
-  id: string
-  label: string
-  to: string
-  icon?: string
-  createdAt: string | Date
+  id: string;
+  label: string;
+  to: string;
+  icon?: string;
+  createdAt: string | Date;
 }
 
 export function useChatActions() {
-  const route = useRoute()
-  const toast = useToast()
-  const overlay = useOverlay()
-  const { csrf, headerName } = useCsrf()
+  const route = useRoute();
+  const toast = useToast();
+  const overlay = useOverlay();
+  const { csrf, headerName } = useCsrf();
 
-  const renameModal = overlay.create(LazyModalRename)
+  const renameModal = overlay.create(LazyModalRename);
   const deleteModal = overlay.create(LazyModalConfirm, {
     props: {
       title: 'Delete chat',
       description: 'Are you sure you want to delete this chat? This cannot be undone.',
-      color: 'error'
-    }
-  })
+      color: 'error',
+    },
+  });
 
   async function renameChat(id: string, currentTitle?: string | null): Promise<string | null> {
-    const instance = renameModal.open({ title: currentTitle ?? '' })
-    const result = await instance.result
+    const instance = renameModal.open({ title: currentTitle ?? '' });
+    const result = await instance.result;
 
-    if (!result || result === currentTitle) return null
+    if (!result || result === currentTitle) return null;
 
     try {
       await $fetch(`/api/chats/${id}/title`, {
         method: 'PATCH',
         headers: { [headerName]: csrf },
-        body: { title: result }
-      })
+        body: { title: result },
+      });
 
-      const chatsCache = useNuxtData<ChatListItem[]>('chats')
+      const chatsCache = useNuxtData<ChatListItem[]>('chats');
       if (chatsCache.data.value) {
-        chatsCache.data.value = chatsCache.data.value.map(c =>
-          c.id === id ? { ...c, label: result } : c
-        )
+        chatsCache.data.value = chatsCache.data.value.map((c) =>
+          c.id === id ? { ...c, label: result } : c,
+        );
       }
 
-      const chatCache = useNuxtData<{ title: string | null }>(`chat-${id}`)
+      const chatCache = useNuxtData<{ title: string | null }>(`chat-${id}`);
       if (chatCache.data.value) {
-        chatCache.data.value = { ...chatCache.data.value, title: result }
+        chatCache.data.value = { ...chatCache.data.value, title: result };
       }
 
-      return result
+      return result;
     } catch {
       toast.add({
         description: 'Failed to rename chat',
         icon: 'i-lucide-alert-circle',
-        color: 'error'
-      })
+        color: 'error',
+      });
 
-      return null
+      return null;
     }
   }
 
   async function deleteChat(id: string): Promise<boolean> {
-    const instance = deleteModal.open()
-    const result = await instance.result
+    const instance = deleteModal.open();
+    const result = await instance.result;
 
-    if (!result) return false
+    if (!result) return false;
 
     try {
       await $fetch(`/api/chats/${id}`, {
         method: 'DELETE',
-        headers: { [headerName]: csrf }
-      })
-
+        headers: { [headerName]: csrf },
+      });
+      /*
       toast.add({
         title: 'Chat deleted',
         description: 'Your chat has been deleted',
-        icon: 'i-lucide-trash'
-      })
-
-      const chatsCache = useNuxtData<ChatListItem[]>('chats')
+        icon: 'i-lucide-trash',
+      });
+      */
+      const chatsCache = useNuxtData<ChatListItem[]>('chats');
       if (chatsCache.data.value) {
-        chatsCache.data.value = chatsCache.data.value.filter(c => c.id !== id)
+        chatsCache.data.value = chatsCache.data.value.filter((c) => c.id !== id);
       }
 
       if (route.params.id === id) {
-        navigateTo('/')
+        navigateTo('/');
       }
 
-      return true
+      return true;
     } catch {
       toast.add({
         description: 'Failed to delete chat',
         icon: 'i-lucide-alert-circle',
-        color: 'error'
-      })
+        color: 'error',
+      });
 
-      return false
+      return false;
     }
   }
 
   return {
     renameChat,
-    deleteChat
-  }
+    deleteChat,
+  };
 }
