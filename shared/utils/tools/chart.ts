@@ -5,7 +5,14 @@ import type { UIToolInvocation } from 'ai';
 export type ChartUIToolInvocation = UIToolInvocation<typeof chartTool>;
 
 export const chartTool = tool({
-  description: 'Create a line chart visualization with one or multiple data series. Use this tool to display time-series data, trends, or comparisons between different metrics over time.',
+  description: [
+    'Create a LINE chart for continuous data plotted on an ORDERED x-axis (time series, dates, sequential indices, or any naturally ordered numeric axis).',
+    'Use when showing trends, evolution over time, or comparing how multiple metrics change across an ordered axis.',
+    'Examples: stock price over months, temperature over days, instance values across SeriesNumber.',
+    'Do NOT use this tool to compare a small number of independent categories (modalities, patient names, file types) — use `bar_chart` for that.',
+    'Do NOT use this tool to show parts of a single whole / proportions — use `donut_chart` for that.',
+    'Do NOT use this tool when totals or cumulative magnitude matter more than the line — use `area_chart` for that.',
+  ].join(' '),
   inputSchema: z.object({
     title: z.string().optional().describe('Title of the chart'),
     data: z.array(z.record(z.string(), z.union([z.string(), z.number()]))).min(1).describe('REQUIRED: Array of data points (minimum 1 point). Each object must contain the xKey property and all series keys'),

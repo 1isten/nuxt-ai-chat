@@ -48,6 +48,18 @@ function formatToolOutput(output: unknown): string {
         v-if="getToolName(part) === 'chart'"
         :invocation="{ ...(part as ChartUIToolInvocation) }"
       />
+      <ChatToolChartBar
+        v-else-if="getToolName(part) === 'bar_chart'"
+        :invocation="{ ...(part as BarChartUIToolInvocation) }"
+      />
+      <ChatToolChartDonut
+        v-else-if="getToolName(part) === 'donut_chart'"
+        :invocation="{ ...(part as DonutChartUIToolInvocation) }"
+      />
+      <ChatToolChartArea
+        v-else-if="getToolName(part) === 'area_chart'"
+        :invocation="{ ...(part as AreaChartUIToolInvocation) }"
+      />
       <ChatToolWeather
         v-else-if="getToolName(part) === 'weather'"
         :invocation="{ ...(part as WeatherUIToolInvocation) }"

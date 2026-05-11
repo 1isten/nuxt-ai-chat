@@ -109,15 +109,50 @@ process.once('beforeExit', () => { void stopCopilotClient(); });
 // Built-in tools (chart, weather) wrapped for Copilot SDK
 // ---------------------------------------------------------------------------
 
+const seriesZod = z.array(z.object({
+  key: z.string(),
+  name: z.string(),
+  color: z.string(),
+})).min(1);
+
+const xySeriesDataZod = z.array(z.record(z.string(), z.union([z.string(), z.number()]))).min(1);
+
 const chartZod = z.object({
   title: z.string().optional(),
-  data: z.array(z.record(z.string(), z.union([z.string(), z.number()]))).min(1),
+  data: xySeriesDataZod,
   xKey: z.string(),
-  series: z.array(z.object({
-    key: z.string(),
-    name: z.string(),
+  series: seriesZod,
+  xLabel: z.string().optional(),
+  yLabel: z.string().optional(),
+});
+
+const barChartZod = z.object({
+  title: z.string().optional(),
+  data: xySeriesDataZod,
+  xKey: z.string(),
+  series: seriesZod,
+  stacked: z.boolean().optional(),
+  horizontal: z.boolean().optional(),
+  xLabel: z.string().optional(),
+  yLabel: z.string().optional(),
+});
+
+const donutChartZod = z.object({
+  title: z.string().optional(),
+  data: z.array(z.object({
+    label: z.string(),
+    value: z.number(),
     color: z.string(),
-  })).min(1),
+  })).min(2).max(8),
+  variant: z.enum(['donut', 'pie']).optional(),
+});
+
+const areaChartZod = z.object({
+  title: z.string().optional(),
+  data: xySeriesDataZod,
+  xKey: z.string(),
+  series: seriesZod,
+  stacked: z.boolean().optional(),
   xLabel: z.string().optional(),
   yLabel: z.string().optional(),
 });
@@ -139,8 +174,26 @@ function getWeatherCondition(k: string) {
 function buildBuiltInTools() {
   return [
     defineTool('chart', {
-      description: 'Create a line chart visualization. Use for time-series, trends, or comparing metrics.',
+      description: 'Create a LINE chart for continuous data on an ORDERED x-axis (time series, dates, sequential indices). Use for trends and how metrics change over an ordered axis. Do NOT use for discrete categories (use bar_chart), proportions of a whole (use donut_chart), or cumulative totals (use area_chart).',
       parameters: chartZod,
+      skipPermission: true,
+      handler: async (input) => input,
+    }),
+    defineTool('bar_chart', {
+      description: 'Create a BAR chart to compare DISCRETE INDEPENDENT categories (modalities, patient names, file types, regions). Use whenever the x-axis is a list of category labels rather than an ordered numeric/time axis, especially for counts/sums/comparisons across categories. Supports grouped, stacked (`stacked:true`), and horizontal (`horizontal:true`) layouts. Do NOT use for ordered/continuous axes (use chart), proportions of a whole (use donut_chart). Examples: "instances per modality", "files per patient".',
+      parameters: barChartZod,
+      skipPermission: true,
+      handler: async (input) => input,
+    }),
+    defineTool('donut_chart', {
+      description: 'Create a DONUT or PIE chart to show PROPORTIONS of a single whole (parts-of-a-total). Use only when values truly sum to a meaningful total AND there are at most 6-7 slices. Default visual is a donut; set `variant:"pie"` for a solid pie. ALWAYS honor user wording: set `variant:"pie"` when the user says "pie"/"pie chart"; set `variant:"donut"` when the user says "donut"/"doughnut"/"ring"; omit `variant` if unspecified. Do NOT use to compare absolute values across categories (use bar_chart). Do NOT use with many categories. Do NOT use for time series. Examples: "share of modalities", "distribution of patient genders".',
+      parameters: donutChartZod,
+      skipPermission: true,
+      handler: async (input) => input,
+    }),
+    defineTool('area_chart', {
+      description: 'Create an AREA chart to emphasize CUMULATIVE MAGNITUDE or COMPOSITION over an ordered axis (typically time). Use when totals matter, especially when stacking multiple series whose sum is itself meaningful (`stacked:true`). For pure trend lines without filled area, prefer `chart`. Do NOT use for discrete independent categories (use bar_chart) or single-point proportions (use donut_chart).',
+      parameters: areaChartZod,
       skipPermission: true,
       handler: async (input) => input,
     }),
