@@ -1,0 +1,13 @@
+diff --git a/dist/index.mjs b/dist/index.mjs
+index 8e65845a716c02de5aecbb93b88b10baee0b064d..bf584a6ee7984787591ecfc23e12b1a014a93086 100644
+--- a/dist/index.mjs
++++ b/dist/index.mjs
+@@ -288,7 +288,7 @@ function ViteNodePlugin(nuxt) {
+ 				const viteNodeServerOptions = {
+ 					socketPath,
+ 					root: nuxt.options.srcDir,
+-					entryPath: resolveServerEntry(ssrServer.config),
++					entryPath: nuxt.options.ssr ? resolveServerEntry(ssrServer.config) : resolveClientEntry(ssrServer.config),
+ 					base: ssrServer.config.base || "/_nuxt/",
+ 					maxRetryAttempts: nuxt.options.vite.viteNode?.maxRetryAttempts,
+ 					baseRetryDelay: nuxt.options.vite.viteNode?.baseRetryDelay,
