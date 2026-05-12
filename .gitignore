@@ -35,6 +35,8 @@ logs
 !.github/skills/openspec-archive-change/
 !.github/skills/openspec-explore/
 !.github/skills/openspec-propose/
+!.github/skills/pmt-frontend-bridge
+#.github/skills/pmt-...
 !.github/skills/propose-first/
 
 # esbuild server bundle
