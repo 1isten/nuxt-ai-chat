@@ -8,9 +8,9 @@
     </template>
 
     <template #right>
-      <slot />
+      <slot v-if="false" />
 
-      <UColorModeButton />
+      <UColorModeButton v-if="false" />
 
       <UButton
         color="neutral"

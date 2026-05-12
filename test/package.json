@@ -1,0 +1,14 @@
+{
+  "type": "module",
+  "dependencies": {
+    "@github/copilot-sdk": "^0.3.0",
+    "@libsql/client": "^0.17.3",
+    "ai": "^6.0.177",
+    "drizzle-orm": "^0.45.2",
+    "h3": "^1.15.11",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "tsx": "^4.21.0"
+  }
+}

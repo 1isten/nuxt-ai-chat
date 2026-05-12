@@ -5,3 +5,5 @@ ignoredBuiltDependencies:
   - maplibre-gl
   - unrs-resolver
   - vue-demi
+patchedDependencies:
+  '@nuxt/vite-builder@4.4.5': patches/@nuxt+vite-builder+4.4.5.patch

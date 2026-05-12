@@ -1,3 +1,11 @@
+// Blob delete disabled — see [chatId].put.ts for context.
+import { defineEventHandler, createError } from 'h3';
+
+export default defineEventHandler(() => {
+  throw createError({ statusCode: 501, statusMessage: 'File uploads are disabled' });
+});
+
+/* Original implementation:
 import { blob } from 'hub:blob'
 import { z } from 'zod'
 
@@ -20,3 +28,4 @@ export default defineEventHandler(async (event) => {
 
   return sendNoContent(event)
 })
+*/

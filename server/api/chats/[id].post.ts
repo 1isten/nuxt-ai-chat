@@ -1,159 +1,126 @@
-import type { UIMessage } from 'ai'
-import { convertToModelMessages, createUIMessageStream, createUIMessageStreamResponse, generateText, smoothStream, stepCountIs, streamText } from 'ai'
-import { db, schema } from 'hub:db'
-import { and, eq } from 'drizzle-orm'
-import { z } from 'zod'
-import type { AnthropicLanguageModelOptions } from '@ai-sdk/anthropic'
-import { anthropic } from '@ai-sdk/anthropic'
-import type { GoogleLanguageModelOptions } from '@ai-sdk/google'
-// import { google } from '@ai-sdk/google'
-import type { OpenAILanguageModelResponsesOptions } from '@ai-sdk/openai'
-import { openai } from '@ai-sdk/openai'
+import { defineEventHandler, getValidatedRouterParams, readValidatedBody, createError } from 'h3';
+import type { UIMessage } from 'ai';
+import { eq, and } from 'drizzle-orm';
+import { z } from 'zod';
+import { db, schema } from '../../utils/db';
+import { getUserSession } from '../../utils/auth';
+import { runChatTurn, dropCopilotSession } from '../../utils/copilot';
+import { SKILLS_DIR, discoverSkills, renderSkillsSystemMessage } from '../../utils/skills';
+import { HIDDEN_SKILL_NAMES } from '../../../shared/utils/skills';
+import type { ProviderConfig } from '@github/copilot-sdk';
 
-defineRouteMeta({
-  openAPI: {
-    description: 'Chat with AI.',
-    tags: ['ai']
-  }
-})
+const providerSchema = z.object({
+  type: z.enum(['openai', 'anthropic']).optional(),
+  baseUrl: z.string().url(),
+  apiKey: z.string().optional(),
+  bearerToken: z.string().optional(),
+  wireApi: z.enum(['completions', 'responses']).optional(),
+  headers: z.record(z.string(), z.string()).optional(),
+}).optional();
 
 export default defineEventHandler(async (event) => {
-  const session = await getUserSession(event)
+  const session = await getUserSession(event);
 
-  const { id } = await getValidatedRouterParams(event, z.object({
-    id: z.string()
-  }).parse)
+  const { id } = await getValidatedRouterParams(event, z.object({ id: z.string() }).parse);
 
-  const { model, messages } = await readValidatedBody(event, z.object({
-    model: z.string().refine(value => MODELS.some(m => m.value === value), {
-      message: 'Invalid model'
-    }),
-    messages: z.array(z.custom<UIMessage>())
-  }).parse)
+  const { model, messages, provider, enabledSkills } = await readValidatedBody(event, z.object({
+    model: z.string().min(1),
+    messages: z.array(z.custom<UIMessage>()),
+    provider: providerSchema,
+    /** Skill names the user has explicitly enabled. */
+    enabledSkills: z.array(z.string()).optional(),
+  }).parse);
 
-  const chat = await db.query.chats.findFirst({
-    where: () => and(
-      eq(schema.chats.id, id as string),
-      eq(schema.chats.userId, session.user?.id || session.id)
-    ),
-    with: {
-      messages: true
-    }
-  })
+  const userId = session.user?.id || session.id;
+  const chat = await db().query.chats.findFirst({
+    where: () => and(eq(schema.chats.id, id), eq(schema.chats.userId, userId)),
+    with: { messages: true },
+  });
   if (!chat) {
-    throw createError({ statusCode: 404, statusMessage: 'Chat not found' })
+    throw createError({ statusCode: 404, statusMessage: 'Chat not found' });
   }
 
+  // Auto-title: first 30 chars of the first user message text
+  let newTitle: string | undefined;
   if (!chat.title) {
-    const { text: title } = await generateText({
-      model: 'openai/gpt-4.1-nano',
-      system: `You are a title generator for a chat:
-          - Generate a short title based on the first user's message
-          - The title should be less than 30 characters long
-          - The title should be a summary of the user's message
-          - Do not use quotes (' or ") or colons (:) or any other punctuation
-          - Do not use markdown, just plain text`,
-      prompt: JSON.stringify(messages[0])
-    })
-
-    await db.update(schema.chats).set({ title }).where(eq(schema.chats.id, id as string))
+    const first = messages.find((m) => m.role === 'user');
+    const firstText = first?.parts?.find((p): p is { type: 'text'; text: string } =>
+      typeof p === 'object' && p !== null && 'type' in p && (p as { type: string }).type === 'text',
+    )?.text ?? 'Untitled chat';
+    newTitle = firstText.slice(0, 30).trim() || 'Untitled chat';
+    await db().update(schema.chats).set({ title: newTitle }).where(eq(schema.chats.id, id));
   }
 
-  const lastMessage = messages[messages.length - 1]
+  // Upsert the latest user message (matches original behavior).
+  const lastMessage = messages[messages.length - 1];
   if (lastMessage?.role === 'user' && messages.length > 1) {
-    await db.insert(schema.messages).values({
+    await db().insert(schema.messages).values({
       id: lastMessage.id,
-      chatId: id as string,
+      chatId: id,
       role: 'user',
-      parts: lastMessage.parts
-    }).onConflictDoUpdate({ target: schema.messages.id, set: { parts: lastMessage.parts } })
+      parts: lastMessage.parts,
+    }).onConflictDoUpdate({ target: schema.messages.id, set: { parts: lastMessage.parts } });
   }
 
-  const abortController = new AbortController()
-  event.node.req.on('close', () => abortController.abort())
+  // Detect edit/regenerate: client truncated the message list relative to DB.
+  const persistedCount = chat.messages.length + ((lastMessage?.role === 'user' && messages.length > 1) ? 1 : 0);
+  const truncated = messages.length < persistedCount;
 
-  const stream = createUIMessageStream({
-    execute: async ({ writer }) => {
-      const result = streamText({
-        abortSignal: abortController.signal,
-        model,
-        system: `You are a knowledgeable and helpful AI assistant. ${session.user?.username ? `The user's name is ${session.user.username}.` : ''} Your goal is to provide clear, accurate, and well-structured responses.
+  // Extract latest user prompt + attachments.
+  const parts = (lastMessage?.parts ?? []) as Array<Record<string, unknown>>;
 
-**FORMATTING RULES (CRITICAL):**
-- ABSOLUTELY NO MARKDOWN HEADINGS: Never use #, ##, ###, ####, #####, or ######
-- NO underline-style headings with === or ---
-- Use **bold text** for emphasis and section labels instead
-- Examples:
-  * Instead of "## Usage", write "**Usage:**" or just "Here's how to use it:"
-  * Instead of "# Complete Guide", write "**Complete Guide**" or start directly with content
-- Start all responses with content, never with a heading
+  const promptText = parts
+    .filter((p): p is { type: 'text'; text: string } => p.type === 'text' && typeof p.text === 'string')
+    .map((p) => p.text)
+    .join('\n')
+    .trim() || ' ';
 
-**WEB SEARCH:**
-- You have access to a web search tool to find current, up-to-date information
-- Only use it when the user explicitly asks about recent events, real-time data, or current facts
-- Do NOT search proactively — rely on your knowledge first
-- Cite your sources when providing information from web search results
+  const attachments = parts
+    .filter((p): p is { type: 'file'; mediaType?: string; url: string } =>
+      p.type === 'file' && typeof p.url === 'string',
+    )
+    .map((p) => ({ type: 'file' as const, mediaType: p.mediaType, url: p.url }));
 
-**RESPONSE QUALITY:**
-- Be concise yet comprehensive
-- Use examples when helpful
-- Break down complex topics into digestible parts
-- Maintain a friendly, professional tone`,
-        messages: await convertToModelMessages(messages),
-        tools: {
-          chart: chartTool,
-          weather: weatherTool,
-          ...(model.startsWith('anthropic/') && { web_search: anthropic.tools.webSearch_20250305() }),
-          ...(model.startsWith('openai/') && { web_search: openai.tools.webSearch() })
-          // TODO: enable once AI SDK supports combining provider-defined tools with custom tools
-          // ...(model.startsWith('google/') && { google_search: google.tools.googleSearch({}) })
-        },
-        providerOptions: {
-          anthropic: {
-            thinking: {
-              type: 'enabled',
-              budgetTokens: 2048
-            }
-          } satisfies AnthropicLanguageModelOptions,
-          google: {
-            thinkingConfig: {
-              includeThoughts: true,
-              thinkingLevel: 'low'
-            }
-          } satisfies GoogleLanguageModelOptions,
-          openai: {
-            reasoningEffort: 'low',
-            reasoningSummary: 'detailed'
-          } satisfies OpenAILanguageModelResponsesOptions
-        },
-        stopWhen: stepCountIs(5),
-        experimental_transform: smoothStream()
-      })
+  if (truncated) await dropCopilotSession(id);
 
-      if (!chat.title) {
-        writer.write({
-          type: 'data-chat-title',
-          data: { message: 'Generating title...' },
-          transient: true
-        })
-      }
+  const abortController = new AbortController();
+  event.node.req.on('close', () => abortController.abort());
 
-      writer.merge(result.toUIMessageStream({
-        sendSources: true,
-        sendReasoning: true
-      }))
+  // Resolve which skills to disable: every discovered skill that is NOT
+  // explicitly enabled by the user, plus all hidden (dev-only) skills.
+  const allSkills = await discoverSkills();
+  const enabledSet = new Set(enabledSkills ?? []);
+  const enabledFull = allSkills.filter(
+    (s) => !HIDDEN_SKILL_NAMES.includes(s.name) && enabledSet.has(s.name),
+  );
+  const disabledSkills = [
+    ...allSkills
+      .map((s) => s.name)
+      .filter((name) => !HIDDEN_SKILL_NAMES.includes(name) && !enabledSet.has(name)),
+    ...HIDDEN_SKILL_NAMES,
+  ];
+  const skillsSystemFragment = renderSkillsSystemMessage(enabledFull);
+
+  return await runChatTurn({
+    chatId: id,
+    model,
+    provider: provider as ProviderConfig | undefined,
+    prompt: promptText,
+    attachments,
+    forceNew: truncated,
+    signal: abortController.signal,
+    chatTitle: newTitle,
+    skillDirectories: allSkills.length ? [SKILLS_DIR] : undefined,
+    disabledSkills,
+    skillsSystemFragment,
+    onFinish: async (assistantMessages) => {
+      if (!assistantMessages.length) return;
+      await db().insert(schema.messages).values(assistantMessages.map((m) => ({
+        id: m.id,
+        chatId: id,
+        role: m.role as 'user' | 'assistant',
+        parts: m.parts,
+      }))).onConflictDoNothing();
     },
-    onFinish: async ({ messages }) => {
-      await db.insert(schema.messages).values(messages.map(message => ({
-        id: message.id,
-        chatId: chat.id,
-        role: message.role as 'user' | 'assistant',
-        parts: message.parts
-      }))).onConflictDoNothing()
-    }
-  })
-
-  return createUIMessageStreamResponse({
-    stream
-  })
-})
+  });
+});
