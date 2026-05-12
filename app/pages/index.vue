@@ -135,7 +135,13 @@ const quickChats: Array<{ label: string; icon: string }> = [
                 <ModelSelect />
               </div>
 
-              <UChatPromptSubmit color="neutral" size="sm" :disabled="uploading" />
+              <UChatPromptSubmit
+                :color="input ? 'primary' : 'neutral'"
+                :variant="input ? 'solid' : 'ghost'"
+                icon="i-lucide-send-horizontal"
+                size="sm"
+                :disabled="uploading"
+              />
             </template>
           </UChatPrompt>
 

@@ -276,10 +276,18 @@ onMounted(() => {
               </div>
 
               <UChatPromptSubmit
+                :color="input ? 'primary' : 'neutral'"
+                :variant="input ? 'solid' : 'ghost'"
+                icon="i-lucide-send-horizontal"
+                submitted-color="neutral"
+                submitted-variant="soft"
+                submitted-icon="i-mdi-square-rounded"
+                streaming-color="error"
+                streaming-variant="soft"
+                streaming-icon="i-mdi-square-rounded"
+                size="sm"
                 :status="chat.status"
                 :disabled="uploading"
-                color="neutral"
-                size="sm"
                 @stop="chat.stop()"
                 @reload="chat.regenerate()"
               />
