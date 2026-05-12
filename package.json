@@ -12,7 +12,7 @@
     "typecheck": "nuxt typecheck",
     "db:generate": "drizzle-kit generate --config=drizzle.config.ts",
     "db:migrate": "drizzle-kit migrate --config=drizzle.config.ts",
-    "server:generate": "esbuild server/index.ts --format=esm --platform=node --target=node20 --packages=external --bundle --allow-overwrite --outfile=server/index.min.js",
+    "server:generate": "esbuild server/index.ts --format=esm --platform=node --target=node20 --packages=external --bundle --minify --allow-overwrite --outfile=server/index.min.js",
     "prepackage": "shx rm -rf dist && shx rm -rf .output",
     "package": "npm-run-all2 -s server:generate generate",
     "package:test": "cross-env NUXT_PUBLIC_API_BASE=http://localhost:18040 pnpm run package && cd .output && npm install && cd ..",
