@@ -1,0 +1,3 @@
+[submodule ".github/skills/pmt-module-scaffold"]
+	path = .github/skills/pmt-module-scaffold
+	url = https://github.com/1isten/pmt-module-scaffold
