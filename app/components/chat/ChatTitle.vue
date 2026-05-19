@@ -52,7 +52,7 @@ const items = computed<DropdownMenuItem[][]>(() => [[
       variant="ghost"
       trailing-icon="i-lucide-chevron-down"
       :label="displayTitle"
-      :class="['group min-w-0 max-w-3xs data-[state=open]:bg-elevated', { 'text-muted': !title }]"
+      :class="['group min-w-0 max-w-3xs transition bg-elevated/50 data-[state=open]:bg-elevated', { 'text-muted': !title }]"
       :ui="{
         trailingIcon: 'text-dimmed shrink-0 group-data-[state=open]:rotate-180 transition-transform duration-200',
       }"

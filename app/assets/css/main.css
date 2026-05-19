@@ -33,3 +33,7 @@ html.dark .shiki span {
   font-weight: var(--shiki-dark-font-weight) !important;
   text-decoration: var(--shiki-dark-text-decoration) !important;
 }
+
+article[data-role="user"] [data-slot="content"] p.whitespace-pre-wrap {
+  overflow-x: auto;
+}
