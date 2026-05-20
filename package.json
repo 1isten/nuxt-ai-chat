@@ -17,7 +17,7 @@
     "package": "npm-run-all2 -s server:generate generate",
     "package:test": "cross-env NUXT_PUBLIC_API_BASE=http://localhost:18040 pnpm run package && cd .output && npm install && cd ..",
     "package:electron": "cross-env PACK_ENV=electron NUXT_PUBLIC_API_BASE=h3://localhost pnpm run package && cd .output && npm ci --omit=dev && cd ..",
-    "postpackage": "shx rm .output/nitro.json && shx mv .output/public .output/client && shx mkdir -p .output/server/db && shx cp server/index.min.js .output/server/index.js && shx cp -r server/db/migrations .output/server/db/migrations && shx mkdir .output/.github && shx cp -r .github/skills .output/.github/skills && shx mkdir .output/.data && shx cp -r test .output/test && shx mv .output/test/package.json .output/package.json && shx mv .output/test/package-lock.json .output/package-lock.json && shx mv .output/test/README.md .output/README.md"
+    "postpackage": "shx rm .output/nitro.json && shx mv .output/public .output/client && shx mkdir -p .output/server/db && shx cp server/index.min.js .output/server/index.js && shx cp -r server/db/migrations .output/server/db/migrations && shx mkdir .output/.github && shx cp -r .github/skills .output/.github/skills && rm -rf .output/.github/skills/pmt-module-scaffold/.git && shx mkdir .output/.data && shx cp -r test .output/test && shx mv .output/test/package.json .output/package.json && shx mv .output/test/package-lock.json .output/package-lock.json && shx mv .output/test/README.md .output/README.md"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.76",
