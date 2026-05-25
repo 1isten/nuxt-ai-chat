@@ -5,7 +5,7 @@ import type { UIMessage } from 'ai';
 
 const route = useRoute();
 const toast = useToast();
-const { effectiveModel, effectiveProvider, modelSetupRequired, modelSetupMessage } = useModels();
+const { effectiveModel, effectiveProvider, effectiveReasoningEffort, modelSetupRequired, modelSetupMessage } = useModels();
 const { enabledSkills } = useSkills();
 const { csrf, headerName } = useCsrf();
 
@@ -48,6 +48,7 @@ const chat = new Chat({
     body: () => ({
       model: effectiveModel.value,
       provider: effectiveProvider.value,
+      reasoningEffort: effectiveReasoningEffort.value,
       enabledSkills: enabledSkills.value,
     }),
   }),

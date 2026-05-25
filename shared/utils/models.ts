@@ -23,6 +23,27 @@ export interface ProviderSettings {
   provider?: ProviderConfigClient;
   /** Custom model id to send when byok is true. */
   customModel?: string;
+  /** Whether the custom provider/model should receive a reasoning effort option. */
+  customReasoningEffortEnabled?: boolean;
+  /** Preset reasoning effort, or `custom` to use `customReasoningEffort`. */
+  customReasoningEffortSelection?: ReasoningEffort | 'custom';
+  /** Custom reasoning effort string sent for BYOK requests when `custom` is selected. */
+  customReasoningEffort?: string;
+}
+
+export type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh';
+export type ReasoningEffortValue = ReasoningEffort | string;
+
+export const GENERIC_REASONING_EFFORTS: ReasoningEffort[] = ['low', 'medium', 'high', 'xhigh'];
+
+export interface ModelMetadata {
+  id: string;
+  name: string;
+  contextWindowTokens?: number;
+  maxPromptTokens?: number;
+  supportsReasoningEffort?: boolean;
+  supportedReasoningEfforts?: ReasoningEffort[];
+  defaultReasoningEffort?: ReasoningEffort;
 }
 
 function iconForModel(id: string): string {
@@ -33,6 +54,24 @@ function iconForModel(id: string): string {
   return 'i-lucide-sparkles';
 }
 
-export function modelToSelectItem(m: { id: string; name: string }) {
-  return { label: m.name, value: m.id, icon: iconForModel(m.id) };
+export function formatTokenLimit(tokens?: number): string | undefined {
+  if (!tokens) return undefined;
+  if (tokens >= 1_000_000) return `${Number((tokens / 1_000_000).toFixed(1))}M`;
+  if (tokens >= 1_000) return `${Math.round(tokens / 1_000)}K`;
+  return tokens.toLocaleString();
+}
+
+export function modelToSelectItem(m: ModelMetadata) {
+  const context = formatTokenLimit(m.contextWindowTokens);
+  return {
+    label: m.name,
+    value: m.id,
+    icon: iconForModel(m.id),
+    description: context ? `Max context size: ${context}` : undefined,
+    contextWindowTokens: m.contextWindowTokens,
+    maxPromptTokens: m.maxPromptTokens,
+    supportsReasoningEffort: m.supportsReasoningEffort,
+    supportedReasoningEfforts: m.supportedReasoningEfforts,
+    defaultReasoningEffort: m.defaultReasoningEffort,
+  };
 }

@@ -1,4 +1,4 @@
-import { FALLBACK_MODELS, modelToSelectItem, type ProviderSettings } from '#shared/utils/models';
+import { FALLBACK_MODELS, GENERIC_REASONING_EFFORTS, formatTokenLimit, modelToSelectItem, type ModelMetadata, type ProviderSettings, type ReasoningEffort } from '#shared/utils/models';
 
 export interface CopilotStatus {
   state: 'checking' | 'available' | 'unavailable';
@@ -9,10 +9,16 @@ export interface ModelOption {
   label: string;
   value: string;
   icon: string;
+  description?: string;
+  contextWindowTokens?: number;
+  maxPromptTokens?: number;
+  supportsReasoningEffort?: boolean;
+  supportedReasoningEfforts?: ReasoningEffort[];
+  defaultReasoningEffort?: ReasoningEffort;
 }
 
 interface ModelsResponse {
-  models: { id: string; name: string }[];
+  models: ModelMetadata[];
   copilot?: {
     available: boolean;
     message?: string;
@@ -38,6 +44,7 @@ export function useModels() {
     { byok: false },
     { mergeDefaults: true },
   );
+  const reasoningEffortByModel = useLocalStorage<Record<string, ReasoningEffort>>('reasoningEffortByModel', {});
 
   const dynamicModels = useState<ModelOption[]>('copilot-models', () => FALLBACK_MODELS);
   const copilotStatus = useState<CopilotStatus>('copilot-status', () => ({ state: 'checking' }));
@@ -79,6 +86,56 @@ export function useModels() {
     provider.value.byok ? provider.value.provider : undefined,
   );
 
+  const selectedModel = computed(() =>
+    dynamicModels.value.find((item) => item.value === model.value),
+  );
+
+  const selectedModelContext = computed(() =>
+    formatTokenLimit(selectedModel.value?.contextWindowTokens),
+  );
+
+  const supportedReasoningEfforts = computed(() => {
+    if (provider.value.byok) return [];
+    const selected = selectedModel.value;
+    if (!selected?.supportsReasoningEffort) return [];
+    return selected.supportedReasoningEfforts?.length
+      ? selected.supportedReasoningEfforts
+      : GENERIC_REASONING_EFFORTS;
+  });
+
+  const reasoningEffort = computed<ReasoningEffort | undefined>({
+    get: () => {
+      const supported = supportedReasoningEfforts.value;
+      if (!supported.length) return undefined;
+      const saved = reasoningEffortByModel.value[model.value];
+      if (saved && supported.includes(saved)) return saved;
+      const defaultEffort = selectedModel.value?.defaultReasoningEffort;
+      if (defaultEffort && supported.includes(defaultEffort)) return defaultEffort;
+      return supported[0];
+    },
+    set: (value) => {
+      if (!value) return;
+      reasoningEffortByModel.value = {
+        ...reasoningEffortByModel.value,
+        [model.value]: value,
+      };
+    },
+  });
+
+  const effectiveReasoningEffort = computed(() => {
+    if (provider.value.byok) {
+      if (!provider.value.customReasoningEffortEnabled) return undefined;
+      const selection = provider.value.customReasoningEffortSelection ?? 'medium';
+      if (selection === 'custom') {
+        return provider.value.customReasoningEffort?.trim() || undefined;
+      }
+      return selection;
+    }
+
+    const effort = reasoningEffort.value;
+    return effort && supportedReasoningEfforts.value.includes(effort) ? effort : undefined;
+  });
+
   const modelSetupRequired = computed(() =>
     !provider.value.byok && copilotStatus.value.state === 'unavailable',
   );
@@ -95,11 +152,16 @@ export function useModels() {
     models: dynamicModels,
     /** BYOK settings (cookie-backed). */
     provider,
+    reasoningEffort,
     copilotStatus,
     modelSetupRequired,
     modelSetupMessage,
+    selectedModel,
+    selectedModelContext,
+    supportedReasoningEfforts,
     refreshModels,
     effectiveModel,
     effectiveProvider,
+    effectiveReasoningEffort,
   };
 }

@@ -8,6 +8,7 @@ import { runChatTurn, dropCopilotSession } from '../../utils/copilot';
 import { SKILLS_DIR, discoverSkills, renderSkillsSystemMessage } from '../../utils/skills';
 import { HIDDEN_SKILL_NAMES } from '../../../shared/utils/skills';
 import type { ProviderConfig } from '@github/copilot-sdk';
+import type { ReasoningEffortValue } from '../../../shared/utils/models';
 
 const providerSchema = z.object({
   type: z.enum(['openai', 'anthropic']).optional(),
@@ -23,10 +24,11 @@ export default defineEventHandler(async (event) => {
 
   const { id } = await getValidatedRouterParams(event, z.object({ id: z.string() }).parse);
 
-  const { model, messages, provider, enabledSkills } = await readValidatedBody(event, z.object({
+  const { model, messages, provider, reasoningEffort, enabledSkills } = await readValidatedBody(event, z.object({
     model: z.string().min(1),
     messages: z.array(z.custom<UIMessage>()),
     provider: providerSchema,
+    reasoningEffort: z.string().trim().min(1).optional(),
     /** Skill names the user has explicitly enabled. */
     enabledSkills: z.array(z.string()).optional(),
   }).parse);
@@ -105,6 +107,7 @@ export default defineEventHandler(async (event) => {
     chatId: id,
     model,
     provider: provider as ProviderConfig | undefined,
+    reasoningEffort: reasoningEffort as ReasoningEffortValue | undefined,
     prompt: promptText,
     attachments,
     forceNew: truncated,

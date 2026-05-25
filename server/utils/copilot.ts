@@ -15,7 +15,9 @@ import {
   CopilotClient,
   approveAll,
   defineTool,
+  type ModelInfo,
   type ProviderConfig,
+  type SessionConfig,
   type SessionEvent,
 } from '@github/copilot-sdk';
 import {
@@ -25,6 +27,7 @@ import {
   type UIMessageChunk,
 } from 'ai';
 import { z } from 'zod';
+import type { ModelMetadata, ReasoningEffort, ReasoningEffortValue } from '../../shared/utils/models';
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -238,6 +241,7 @@ interface RunArgs {
   chatId: string;
   model: string;
   provider?: ProviderConfig;
+  reasoningEffort?: ReasoningEffortValue;
   /** Latest user prompt text. */
   prompt: string;
   /** Optional file URLs (from front-end). Currently mapped to attachments by URL string when local file paths are provided. */
@@ -272,10 +276,19 @@ RESPONSE QUALITY:
 - Use examples when helpful
 - Maintain a friendly, professional tone`;
 
+type SdkReasoningEffort = NonNullable<SessionConfig['reasoningEffort']>;
+
+function reasoningEffortConfig(reasoningEffort?: ReasoningEffortValue): { reasoningEffort?: SdkReasoningEffort } {
+  return reasoningEffort
+    ? { reasoningEffort: reasoningEffort as SdkReasoningEffort }
+    : {};
+}
+
 async function getOrCreateSession(args: {
   chatId: string;
   model: string;
   provider?: ProviderConfig;
+  reasoningEffort?: ReasoningEffortValue;
   systemMessage: string;
   forceNew?: boolean;
   skillDirectories?: string[];
@@ -297,6 +310,7 @@ async function getOrCreateSession(args: {
     workingDirectory: cfg.workingDirectory,
     tools: buildBuiltInTools(),
     systemMessage: { content: args.systemMessage },
+    ...reasoningEffortConfig(args.reasoningEffort),
     ...(args.provider ? { provider: args.provider } : {}),
     ...skillsCfg,
   };
@@ -311,6 +325,7 @@ async function getOrCreateSession(args: {
         onPermissionRequest: approveAll,
         workingDirectory: cfg.workingDirectory,
         tools: buildBuiltInTools(),
+        ...reasoningEffortConfig(args.reasoningEffort),
         ...(args.provider ? { provider: args.provider } : {}),
         ...skillsCfg,
       });
@@ -502,11 +517,12 @@ function translateEvent(event: SessionEvent, state: AdapterState): UIMessageChun
  *  a config change and recreate the underlying Copilot session. */
 const _lastConfigByChat = new Map<string, string>();
 
-function configFingerprint(model: string, provider?: ProviderConfig, disabledSkills?: string[], skillsSystemFragment?: string): string {
+function configFingerprint(model: string, provider?: ProviderConfig, reasoningEffort?: ReasoningEffortValue, disabledSkills?: string[], skillsSystemFragment?: string): string {
   const skills = disabledSkills?.length ? [...disabledSkills].sort() : null;
   return JSON.stringify({
     model,
     provider: provider ?? null,
+    reasoningEffort: reasoningEffort ?? null,
     skills,
     fragment: skillsSystemFragment || null,
   });
@@ -516,7 +532,7 @@ export async function runChatTurn(args: RunArgs): Promise<Response> {
   const assistantMessageId = crypto.randomUUID();
   const state = newState(assistantMessageId);
 
-  const fingerprint = configFingerprint(args.model, args.provider, args.disabledSkills, args.skillsSystemFragment);
+  const fingerprint = configFingerprint(args.model, args.provider, args.reasoningEffort, args.disabledSkills, args.skillsSystemFragment);
   const previous = _lastConfigByChat.get(args.chatId);
   const configChanged = previous !== undefined && previous !== fingerprint;
   _lastConfigByChat.set(args.chatId, fingerprint);
@@ -530,6 +546,7 @@ export async function runChatTurn(args: RunArgs): Promise<Response> {
     chatId: args.chatId,
     model: args.model,
     provider: args.provider,
+    reasoningEffort: args.reasoningEffort,
     systemMessage,
     forceNew: args.forceNew || configChanged,
     skillDirectories: args.skillDirectories,
@@ -650,10 +667,22 @@ export async function listCopilotModels(): Promise<Array<{ id: string; name: str
 }
 
 export interface CopilotModelsStatus {
-  models: Array<{ id: string; name: string }>;
+  models: ModelMetadata[];
   copilot: {
     available: boolean;
     message?: string;
+  };
+}
+
+function mapModelInfo(model: ModelInfo): ModelMetadata {
+  return {
+    id: model.id,
+    name: model.name,
+    contextWindowTokens: model.capabilities?.limits?.max_context_window_tokens || undefined,
+    maxPromptTokens: model.capabilities?.limits?.max_prompt_tokens,
+    supportsReasoningEffort: model.capabilities?.supports?.reasoningEffort || false,
+    supportedReasoningEfforts: model.supportedReasoningEfforts as ReasoningEffort[] | undefined,
+    defaultReasoningEffort: model.defaultReasoningEffort as ReasoningEffort | undefined,
   };
 }
 
@@ -663,7 +692,7 @@ export async function getCopilotModelsStatus(): Promise<CopilotModelsStatus> {
     const client = await getCopilotClient();
     const models = await client.listModels();
     return {
-      models: models.map((m) => ({ id: m.id, name: m.name })),
+      models: models.map(mapModelInfo),
       copilot: { available: true },
     };
   } catch (err) {

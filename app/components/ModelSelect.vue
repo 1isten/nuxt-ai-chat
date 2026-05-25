@@ -1,12 +1,33 @@
 <script setup lang="ts">
-import type { ProviderSettings } from '#shared/utils/models';
+import { GENERIC_REASONING_EFFORTS, type ProviderSettings, type ReasoningEffort } from '#shared/utils/models';
 
-const { model, models, provider, copilotStatus, modelSetupRequired, modelSetupMessage, refreshModels, effectiveModel } = useModels();
+const {
+  model,
+  models,
+  provider,
+  reasoningEffort,
+  copilotStatus,
+  modelSetupRequired,
+  modelSetupMessage,
+  selectedModel,
+  selectedModelContext,
+  supportedReasoningEfforts,
+  refreshModels,
+  effectiveModel,
+} = useModels();
 
 function normalize(p: ProviderSettings): ProviderSettings {
+  const savedSelection = p.customReasoningEffortSelection
+    ?? (GENERIC_REASONING_EFFORTS.includes(p.customReasoningEffort as ReasoningEffort)
+      ? p.customReasoningEffort as ReasoningEffort
+      : p.customReasoningEffort ? 'custom' : 'medium');
+
   return {
     byok: p.byok ?? false,
     customModel: p.customModel ?? '',
+    customReasoningEffortEnabled: p.customReasoningEffortEnabled ?? false,
+    customReasoningEffortSelection: savedSelection,
+    customReasoningEffort: savedSelection === 'custom' ? p.customReasoningEffort ?? '' : '',
     provider: {
       type: p.provider?.type ?? 'anthropic',
       baseUrl: p.provider?.baseUrl ?? '',
@@ -79,6 +100,32 @@ const selectModel = computed({
   get: () => provider.value.byok ? (selectItems.value[0]?.value ?? '') : model.value,
   set: (v: string) => { if (!provider.value.byok) model.value = v; },
 });
+
+const reasoningLabels: Record<ReasoningEffort, string> = {
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  xhigh: 'Xhigh',
+};
+
+const reasoningItems = computed(() =>
+  supportedReasoningEfforts.value.map((value) => ({
+    label: reasoningLabels[value],
+    value,
+  })),
+);
+
+const allReasoningItems: Array<{ label: string; value: ReasoningEffort | 'custom' }> = [
+  ...GENERIC_REASONING_EFFORTS.map((value) => ({
+    label: reasoningLabels[value],
+    value,
+  })),
+  { label: 'Custom', value: 'custom' },
+];
+
+const canConfigureReasoning = computed(() =>
+  !provider.value.byok && reasoningItems.value.length > 0,
+);
 </script>
 
 <template>
@@ -102,7 +149,14 @@ const selectModel = computed({
         leadingIcon: 'text-default',
         trailingIcon: 'group-data-[state=open]:rotate-180 transition-transform duration-200',
       }"
-    />
+    >
+      <template #item-label="{ item }">
+        <span :title="item.description">{{ item.label }}</span>
+      </template>
+      <template #item-description="{ item }">
+        <span v-show="false">{{ item.description }}</span>
+      </template>
+    </USelectMenu>
 
     <UButton
       icon="i-lucide-settings-2"
@@ -113,7 +167,7 @@ const selectModel = computed({
       @click="open = true"
     />
 
-    <UModal v-model:open="open" title="Provider settings" :ui="{ content: 'max-w-lg' }">
+    <UModal v-model:open="open" title="Provider Settings" :ui="{ content: 'max-w-lg' }">
       <template #body>
         <div class="space-y-4">
           <UAlert
@@ -129,10 +183,10 @@ const selectModel = computed({
             Bring your own Anthropic / OpenAI-compatible API key.
           </div>
 
-          <UCheckbox v-model="draft.byok" label="Bring my own key (BYOK)" />
+          <UCheckbox v-model="draft.byok" label="Enable bring your own key (BYOK)" />
 
           <template v-if="draft.byok && draft.provider">
-            <UFormField label="Provider type" name="type">
+            <UFormField label="Provider Type" name="type">
               <USelect
                 v-model="draft.provider.type"
                 :items="[
@@ -155,7 +209,7 @@ const selectModel = computed({
               />
             </UFormField>
 
-            <UFormField label="Model id" name="customModel" required>
+            <UFormField label="Model ID" name="customModel" required>
               <UInput
                 v-model="draft.customModel"
                 size="sm"
@@ -185,11 +239,65 @@ const selectModel = computed({
                 class="w-full"
               />
             </UFormField>
+
+            <USeparator />
+
+            <UCheckbox
+              v-model="draft.customReasoningEffortEnabled"
+              label="Extra config options"
+            />
+            <template v-if="draft.customReasoningEffortEnabled">
+              <UFormField
+                label="Thinking Effort"
+                name="customReasoningEffortSelection"
+              >
+                <USelect
+                  v-model="draft.customReasoningEffortSelection"
+                  :items="allReasoningItems"
+                  value-key="value"
+                  size="sm"
+                  class="w-full"
+                />
+              </UFormField>
+
+              <UFormField
+                v-if="draft.customReasoningEffortSelection === 'custom'"
+                label="Thinking Effort (Custom)"
+                name="customReasoningEffort"
+              >
+                <UInput
+                  v-model="draft.customReasoningEffort"
+                  size="sm"
+                  class="w-full"
+                  placeholder="e.g. max"
+                />
+              </UFormField>
+            </template>
           </template>
 
-          <div v-else class="text-xs text-muted">
-            Currently sending requests as: <span class="font-mono">{{ effectiveModel }}</span>
-          </div>
+          <template v-else>
+            <USeparator />
+
+            <div class="text-xs text-muted">
+              Currently sending requests as: <span class="font-mono">{{ effectiveModel }}</span>
+              <template v-if="canConfigureReasoning && reasoningEffort"><span> · </span><span class="font-mono">{{ reasoningEffort }}</span></template>
+            </div>
+
+            <UFormField
+              v-if="canConfigureReasoning"
+              label="Thinking Effort"
+              name="reasoningEffort"
+              :help="selectedModel?.defaultReasoningEffort ? `Default: ${reasoningLabels[selectedModel.defaultReasoningEffort]}` : undefined"
+            >
+              <USelect
+                v-model="reasoningEffort"
+                :items="reasoningItems"
+                value-key="value"
+                size="sm"
+                class="w-full"
+              />
+            </UFormField>
+          </template>
         </div>
       </template>
 
