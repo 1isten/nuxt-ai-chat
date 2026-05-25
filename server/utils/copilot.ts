@@ -85,9 +85,15 @@ export async function getCopilotClient(): Promise<CopilotClient> {
       ...(cfg.env ? { env: cfg.env } : {}),
       ...(cfg.cliPath ? { cliPath: cfg.cliPath } : {}),
     });
-    await client.start();
-    _client = client;
-    return client;
+    try {
+      await client.start();
+      _client = client;
+      return client;
+    } catch (err) {
+      _starting = null;
+      try { await client.stop(); } catch { /* ignore */ }
+      throw err;
+    }
   })();
   return _starting;
 }
@@ -639,12 +645,35 @@ export async function dropCopilotSession(chatId: string): Promise<void> {
 
 /** List models exposed by the Copilot CLI. Empty array on failure. */
 export async function listCopilotModels(): Promise<Array<{ id: string; name: string }>> {
+  const result = await getCopilotModelsStatus();
+  return result.models;
+}
+
+export interface CopilotModelsStatus {
+  models: Array<{ id: string; name: string }>;
+  copilot: {
+    available: boolean;
+    message?: string;
+  };
+}
+
+/** List models and report whether local Copilot auth/runtime is usable. */
+export async function getCopilotModelsStatus(): Promise<CopilotModelsStatus> {
   try {
     const client = await getCopilotClient();
     const models = await client.listModels();
-    return models.map((m) => ({ id: m.id, name: m.name }));
+    return {
+      models: models.map((m) => ({ id: m.id, name: m.name })),
+      copilot: { available: true },
+    };
   } catch (err) {
     console.error('[copilot] listModels failed', err);
-    return [];
+    return {
+      models: [],
+      copilot: {
+        available: false,
+        message: 'Sign in to GitHub Copilot in your terminal, or enable BYOK provider settings.',
+      },
+    };
   }
 }

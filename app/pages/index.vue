@@ -4,6 +4,7 @@ const loading = ref(false);
 const chatId = crypto.randomUUID();
 
 const { user } = useUserSession();
+const { modelSetupRequired, modelSetupMessage } = useModels();
 
 const greeting = computed(() => {
   const hour = new Date().getHours();
@@ -56,6 +57,7 @@ async function createChat(prompt: string) {
 }
 
 async function onSubmit() {
+  if (modelSetupRequired.value) return;
   await createChat(input.value);
   clearFiles();
 }
@@ -114,10 +116,19 @@ const quickChats: Array<{ label: string; icon: string }> = [
             {{ greeting }}
           </h1>
 
+          <UAlert
+            v-if="modelSetupRequired"
+            color="warning"
+            variant="soft"
+            icon="i-lucide-circle-alert"
+            title="GitHub Copilot is not available locally"
+            :description="modelSetupMessage"
+          />
+
           <UChatPrompt
             v-model="input"
             :status="loading ? 'streaming' : 'ready'"
-            :disabled="uploading"
+            :disabled="uploading || modelSetupRequired"
             class="[view-transition-name:chat-prompt]"
             variant="subtle"
             :ui="{ base: 'px-1.5' }"
@@ -140,7 +151,7 @@ const quickChats: Array<{ label: string; icon: string }> = [
                 :variant="input ? 'solid' : 'ghost'"
                 icon="i-lucide-send-horizontal"
                 size="sm"
-                :disabled="uploading"
+                :disabled="uploading || modelSetupRequired"
               />
             </template>
           </UChatPrompt>

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { ProviderSettings } from '#shared/utils/models';
 
-const { model, models, provider, refreshModels, effectiveModel } = useModels();
+const { model, models, provider, copilotStatus, modelSetupRequired, modelSetupMessage, refreshModels, effectiveModel } = useModels();
 
 function normalize(p: ProviderSettings): ProviderSettings {
   return {
@@ -86,10 +86,10 @@ const selectModel = computed({
     <USelectMenu
       v-model="selectModel"
       :items="selectItems"
-      :disabled="provider.byok"
+      :disabled="provider.byok || modelSetupRequired"
       size="sm"
       icon="i-lucide-sparkles"
-      variant="ghost"
+      :variant="modelSetupRequired ? 'soft' : 'ghost'"
       value-key="value"
       class="data-[state=open]:bg-elevated"
       :content="{
@@ -107,15 +107,24 @@ const selectModel = computed({
     <UButton
       icon="i-lucide-settings-2"
       size="sm"
-      color="neutral"
-      variant="ghost"
-      :title="provider.byok ? 'BYOK enabled \u2014 click to edit' : 'Provider settings'"
+      :color="modelSetupRequired ? 'warning' : 'neutral'"
+      :variant="modelSetupRequired ? 'soft' : 'ghost'"
+      :title="modelSetupRequired ? 'GitHub Copilot unavailable - open provider settings' : provider.byok ? 'BYOK enabled - click to edit' : 'Provider settings'"
       @click="open = true"
     />
 
     <UModal v-model:open="open" title="Provider settings" :ui="{ content: 'max-w-lg' }">
       <template #body>
         <div class="space-y-4">
+          <UAlert
+            v-if="!draft.byok && copilotStatus.state === 'unavailable'"
+            color="warning"
+            variant="soft"
+            icon="i-lucide-circle-alert"
+            title="GitHub Copilot is not available locally"
+            :description="modelSetupMessage"
+          />
+
           <div class="text-xs text-muted">
             Bring your own Anthropic / OpenAI-compatible API key.
           </div>

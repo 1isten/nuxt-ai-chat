@@ -5,7 +5,7 @@ import type { UIMessage } from 'ai';
 
 const route = useRoute();
 const toast = useToast();
-const { effectiveModel, effectiveProvider } = useModels();
+const { effectiveModel, effectiveProvider, modelSetupRequired, modelSetupMessage } = useModels();
 const { enabledSkills } = useSkills();
 const { csrf, headerName } = useCsrf();
 
@@ -82,7 +82,7 @@ const chat = new Chat({
 
 async function handleSubmit(e: Event) {
   e.preventDefault();
-  if (input.value.trim() && !uploading.value) {
+  if (input.value.trim() && !uploading.value && !modelSetupRequired.value) {
     chat.sendMessage({
       text: input.value,
       files: uploadedFiles.value.length > 0 ? uploadedFiles.value : undefined,
@@ -253,11 +253,20 @@ onMounted(() => {
             </template>
           </UChatMessages>
 
+          <UAlert
+            v-if="isOwner && modelSetupRequired"
+            color="warning"
+            variant="soft"
+            icon="i-lucide-circle-alert"
+            title="GitHub Copilot is not available locally"
+            :description="modelSetupMessage"
+          />
+
           <UChatPrompt
             v-if="isOwner"
             v-model="input"
             :error="chat.error"
-            :disabled="uploading"
+            :disabled="uploading || modelSetupRequired"
             variant="subtle"
             class="sticky bottom-0 [view-transition-name:chat-prompt] rounded-b-none z-10"
             :ui="{ base: 'px-1.5' }"
@@ -287,7 +296,7 @@ onMounted(() => {
                 streaming-icon="i-mdi-square-rounded"
                 size="sm"
                 :status="chat.status"
-                :disabled="uploading"
+                :disabled="uploading || modelSetupRequired"
                 @stop="chat.stop()"
                 @reload="chat.regenerate()"
               />

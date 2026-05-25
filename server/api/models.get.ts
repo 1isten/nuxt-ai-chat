@@ -1,7 +1,6 @@
 import { defineEventHandler } from 'h3';
-import { listCopilotModels } from '../utils/copilot';
+import { getCopilotModelsStatus } from '../utils/copilot';
 
 export default defineEventHandler(async () => {
-  const models = await listCopilotModels();
-  return { models };
+  return await getCopilotModelsStatus();
 });

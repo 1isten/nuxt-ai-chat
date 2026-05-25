@@ -1,9 +1,22 @@
 import { FALLBACK_MODELS, modelToSelectItem, type ProviderSettings } from '#shared/utils/models';
 
+export interface CopilotStatus {
+  state: 'checking' | 'available' | 'unavailable';
+  message?: string;
+}
+
 export interface ModelOption {
   label: string;
   value: string;
   icon: string;
+}
+
+interface ModelsResponse {
+  models: { id: string; name: string }[];
+  copilot?: {
+    available: boolean;
+    message?: string;
+  };
 }
 
 /**
@@ -27,10 +40,16 @@ export function useModels() {
   );
 
   const dynamicModels = useState<ModelOption[]>('copilot-models', () => FALLBACK_MODELS);
+  const copilotStatus = useState<CopilotStatus>('copilot-status', () => ({ state: 'checking' }));
 
   async function refreshModels() {
+    copilotStatus.value = { state: 'checking' };
     try {
-      const res = await $fetch<{ models: { id: string; name: string }[] }>('/api/models');
+      const res = await $fetch<ModelsResponse>('/api/models');
+      copilotStatus.value = res.copilot?.available === false
+        ? { state: 'unavailable', message: res.copilot.message }
+        : { state: 'available' };
+
       if (res.models?.length) {
         dynamicModels.value = res.models.map(modelToSelectItem);
         // Auto-select first if current value is no longer valid
@@ -41,6 +60,10 @@ export function useModels() {
     } catch (err) {
       // Keep fallback list silently
       console.warn('[useModels] failed to load /api/models', err);
+      copilotStatus.value = {
+        state: 'unavailable',
+        message: 'Unable to check local GitHub Copilot. Confirm the API server is running, or enable BYOK provider settings.',
+      };
     }
   }
 
@@ -56,6 +79,15 @@ export function useModels() {
     provider.value.byok ? provider.value.provider : undefined,
   );
 
+  const modelSetupRequired = computed(() =>
+    !provider.value.byok && copilotStatus.value.state === 'unavailable',
+  );
+
+  const modelSetupMessage = computed(() =>
+    copilotStatus.value.message
+    || 'Sign in to GitHub Copilot in your terminal, or enable BYOK provider settings.',
+  );
+
   return {
     /** UI-bound currently-selected built-in model. */
     model,
@@ -63,6 +95,9 @@ export function useModels() {
     models: dynamicModels,
     /** BYOK settings (cookie-backed). */
     provider,
+    copilotStatus,
+    modelSetupRequired,
+    modelSetupMessage,
     refreshModels,
     effectiveModel,
     effectiveProvider,
