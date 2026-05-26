@@ -19,9 +19,15 @@ export default defineNuxtConfig({
     },
   } : {
     devServer: {
+      host: '127.0.0.1',
       port: 18041,
     },
   }),
+
+  routeRules: {
+    // @ts-expect-error nuxt-csurf supports this route-rule key at runtime.
+    '/api/proxy/deepseek/v1/**': { csurf: false },
+  },
 
   modules: [
     '@nuxt/eslint',

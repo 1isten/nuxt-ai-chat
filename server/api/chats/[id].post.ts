@@ -86,7 +86,7 @@ export default defineEventHandler(async (event) => {
   if (truncated) await dropCopilotSession(id);
 
   const abortController = new AbortController();
-  event.node.req.on('close', () => abortController.abort());
+  event.node.res.on('close', () => abortController.abort());
 
   // Resolve which skills to disable: every discovered skill that is NOT
   // explicitly enabled by the user, plus all hidden (dev-only) skills.

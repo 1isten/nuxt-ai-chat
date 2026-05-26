@@ -1,12 +1,12 @@
 /**
  * Single entry point that re-exports every server-side symbol the
- * standalone h3 server needs. Bundle this file (via `pnpm generate:server`)
- * into `dist/server.js` and ship that single file from your Electron app
+ * standalone h3 server needs. Bundle this file (via `pnpm server:generate`)
+ * into `server/index.min.js` and ship that single file from your Electron app
  * instead of copying the entire `server/` + `shared/` source trees.
  *
- * Build command (see package.json `generate:server`):
+ * Build command (see package.json `server:generate`):
  *   esbuild server/index.ts --bundle --platform=node --format=esm \
- *     --packages=external --outfile=dist/server.js
+ *     --packages=external --outfile=server/index.min.js
  *
  * Bundled  = your own source under `server/` + `shared/`.
  * External = anything in node_modules (drizzle, h3, @libsql/client,
@@ -35,3 +35,4 @@ export { default as modelsGet } from './api/models.get';
 export { default as skillsGet } from './api/skills.get';
 export { default as uploadPut } from './api/upload/[chatId].put';
 export { default as uploadDelete } from './api/upload/[...pathname].delete';
+export { default as proxyDeepSeekChatCompletionsPost } from './api/proxy/deepseek/v1/chat/completions.post';
