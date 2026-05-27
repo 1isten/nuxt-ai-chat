@@ -190,7 +190,7 @@ const canConfigureReasoning = computed(() =>
               <USelect
                 v-model="draft.provider.type"
                 :items="[
-                  { label: 'Anthropic', value: 'anthropic' },
+                  { label: 'Anthropic / DeepSeek', value: 'anthropic' },
                   { label: 'OpenAI / OpenAI-compatible', value: 'openai' },
                 ]"
                 value-key="value"
@@ -214,7 +214,7 @@ const canConfigureReasoning = computed(() =>
                 v-model="draft.customModel"
                 size="sm"
                 class="w-full"
-                :placeholder="draft.provider.type === 'anthropic' ? 'e.g. claude-haiku-4.5' : 'e.g. gpt-4.1'"
+                :placeholder="draft.provider.type === 'anthropic' ? 'e.g. claude-opus-4.6, deepseek-v4-pro' : 'e.g. gpt-4.1, glm-4.6v'"
               />
             </UFormField>
 
@@ -223,7 +223,7 @@ const canConfigureReasoning = computed(() =>
                 v-model="draft.provider.baseUrl"
                 size="sm"
                 class="w-full"
-                :placeholder="`e.g. ${DEFAULT_BASE_URLS[draft.provider.type ?? 'anthropic']}`"
+                :placeholder="`e.g. ${DEFAULT_BASE_URLS[draft.provider.type ?? 'anthropic']}` + (draft.provider.type === 'anthropic' ? ', https://api.deepseek.com/anthropic' : ', https://open.bigmodel.cn/api/paas/v4/')"
               />
             </UFormField>
 

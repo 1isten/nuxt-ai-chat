@@ -1,5 +1,5 @@
-import { createServer } from 'node:http';
 import { createApp, createRouter, defineEventHandler, handleCors, toNodeListener } from 'h3';
+import { createServer } from 'node:http';
 
 import {
   createDb,
@@ -20,7 +20,7 @@ import {
   skillsGet,
   uploadPut,
   uploadDelete,
-  proxyDeepSeekChatCompletionsPost,
+  // proxyDeepSeekChatCompletionsPost,
 } from '../server';
 
 async function main() {
@@ -77,7 +77,7 @@ async function main() {
   router.get('/api/skills', skillsGet);
   router.put('/api/upload/:chatId', uploadPut);
   router.delete('/api/upload/**:pathname', uploadDelete);
-  router.post('/api/proxy/deepseek/v1/chat/completions', proxyDeepSeekChatCompletionsPost);
+  // router.post('/api/proxy/deepseek/v1/chat/completions', proxyDeepSeekChatCompletionsPost);
 
   app.use(router);
 

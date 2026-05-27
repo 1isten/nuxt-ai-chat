@@ -35,4 +35,4 @@ export { default as modelsGet } from './api/models.get';
 export { default as skillsGet } from './api/skills.get';
 export { default as uploadPut } from './api/upload/[chatId].put';
 export { default as uploadDelete } from './api/upload/[...pathname].delete';
-export { default as proxyDeepSeekChatCompletionsPost } from './api/proxy/deepseek/v1/chat/completions.post';
+// export { default as proxyDeepSeekChatCompletionsPost } from './api/proxy/deepseek/v1/chat/completions.post';

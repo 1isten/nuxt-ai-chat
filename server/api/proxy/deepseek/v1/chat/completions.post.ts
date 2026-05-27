@@ -1,3 +1,5 @@
+// deprecated: https://api-docs.deepseek.com/quick_start/agent_integrations/copilot_cli
+
 import { createError, defineEventHandler, getRequestHeaders, getRequestURL, readRawBody } from 'h3';
 
 /**

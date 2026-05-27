@@ -25,8 +25,7 @@ export default defineNuxtConfig({
   }),
 
   routeRules: {
-    // @ts-expect-error nuxt-csurf supports this route-rule key at runtime.
-    '/api/proxy/deepseek/v1/**': { csurf: false },
+    // '/api/proxy/deepseek/v1/**': { csurf: false },
   },
 
   modules: [
