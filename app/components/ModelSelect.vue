@@ -214,7 +214,7 @@ const canConfigureReasoning = computed(() =>
                 v-model="draft.customModel"
                 size="sm"
                 class="w-full"
-                :placeholder="draft.provider.type === 'anthropic' ? 'e.g. claude-opus-4.6, deepseek-v4-pro' : 'e.g. gpt-4.1, glm-4.6v'"
+                :placeholder="draft.provider.type === 'anthropic' ? 'e.g. claude-opus-4.6, deepseek-v4-pro' : 'e.g. gpt-4.1, glm-5.1'"
               />
             </UFormField>
 
