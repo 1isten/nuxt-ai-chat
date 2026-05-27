@@ -13,6 +13,7 @@ import {
   chatsIdDelete,
   messagesDelete,
   titlePatch,
+  titlePost,
   visibilityPatch,
   votesGet,
   votesPost,
@@ -70,6 +71,7 @@ async function main() {
   router.delete('/api/chats/:id', chatsIdDelete);
   router.delete('/api/chats/:id/messages', messagesDelete);
   router.patch('/api/chats/:id/title', titlePatch);
+  router.post('/api/chats/:id/title', titlePost);
   router.patch('/api/chats/:id/visibility', visibilityPatch);
   router.get('/api/chats/:id/votes', votesGet);
   router.post('/api/chats/:id/votes', votesPost);

@@ -11,12 +11,15 @@ const { csrf, headerName } = useCsrf();
 
 const { data } = await useFetch(`/api/chats/${route.params.id}`, {
   key: `chat-${route.params.id}`,
-  cache: 'force-cache',
+  cache: 'no-store',
 });
+
+type ChatData = NonNullable<typeof data.value>;
 
 const isOwner = computed(() => data.value?.isOwner ?? false);
 const visibility = ref<'public' | 'private'>(data.value?.visibility ?? 'private');
 const title = ref<string | null>(data.value?.title ?? null);
+const titleGenerationAttempted = ref(false);
 
 watch(() => data.value?.title, (next) => {
   title.value = next ?? null;
@@ -79,7 +82,73 @@ const chat = new Chat({
       duration: 0,
     });
   },
+  onFinish: ({ messages }) => {
+    updateCachedMessages(messages);
+    void refreshNuxtData(`chat-${data.value!.id}`);
+  },
 });
+
+function updateCachedMessages(messages: UIMessage[]) {
+  const chatCache = useNuxtData<ChatData>(`chat-${data.value!.id}`);
+  if (chatCache.data.value) {
+    chatCache.data.value = { ...chatCache.data.value, messages: messages as ChatData['messages'] };
+  }
+}
+
+function updateChatData(nextData: ChatData) {
+  const chatCache = useNuxtData<ChatData>(`chat-${nextData.id}`);
+  chatCache.data.value = nextData;
+  chat.messages = nextData.messages;
+  title.value = nextData.title ?? null;
+  visibility.value = nextData.visibility;
+}
+
+function updateCachedTitle(nextTitle: string) {
+  title.value = nextTitle;
+
+  const chatsCache = useNuxtData<{ id: string; label: string }[]>('chats');
+  if (chatsCache.data.value) {
+    chatsCache.data.value = chatsCache.data.value.map((chat) =>
+      chat.id === data.value!.id ? { ...chat, label: nextTitle } : chat,
+    );
+  }
+
+  const chatCache = useNuxtData<ChatData>(`chat-${data.value!.id}`);
+  if (chatCache.data.value) {
+    chatCache.data.value = { ...chatCache.data.value, title: nextTitle, messages: chat.messages as ChatData['messages'] };
+  }
+}
+
+async function generateTitleOnce() {
+  if (
+    titleGenerationAttempted.value
+    || !isOwner.value
+    || !data.value?.id
+    || !title.value
+    || modelSetupRequired.value
+  ) {
+    return;
+  }
+
+  titleGenerationAttempted.value = true;
+
+  try {
+    const result = await $fetch<{ title: string | null; generated: boolean }>(`/api/chats/${data.value.id}/title`, {
+      method: 'POST',
+      headers: { [headerName]: csrf },
+      body: {
+        model: effectiveModel.value,
+        provider: effectiveProvider.value,
+      },
+    });
+
+    if (result.generated && result.title) {
+      updateCachedTitle(result.title);
+    }
+  } catch (error) {
+    console.warn('[chat-title] failed to generate title', error);
+  }
+}
 
 async function handleSubmit(e: Event) {
   e.preventDefault();
@@ -166,11 +235,31 @@ async function vote(message: UIMessage, isUpvoted: boolean) {
   }
 }
 
-onMounted(() => {
-  if (isOwner.value && data.value?.messages.length === 1) {
+async function bootstrapInitialAssistantResponse() {
+  if (!isOwner.value || data.value?.messages.length !== 1) return;
+
+  const latest = await $fetch<ChatData>(`/api/chats/${data.value.id}`, {
+    cache: 'no-store',
+  });
+  updateChatData(latest);
+
+  if (latest.messages.length === 1) {
     chat.regenerate();
   }
+}
+
+onMounted(() => {
+  void bootstrapInitialAssistantResponse();
 });
+
+// Trigger one-shot LLM title generation whenever the chat has a (fallback)
+// title and a model is ready. Covers both existing chats (title set on mount)
+// and brand-new chats (title arrives via onData after the first turn).
+watch(
+  [title, modelSetupRequired],
+  () => { void generateTitleOnce(); },
+  { immediate: true },
+);
 </script>
 
 <template>

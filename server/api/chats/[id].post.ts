@@ -1,10 +1,11 @@
 import { defineEventHandler, getValidatedRouterParams, readValidatedBody, createError } from 'h3';
-import type { UIMessage } from 'ai';
+import { type UIMessage, createUIMessageStream, createUIMessageStreamResponse } from 'ai';
 import { eq, and } from 'drizzle-orm';
 import { z } from 'zod';
 import { db, schema } from '../../utils/db';
 import { getUserSession } from '../../utils/auth';
 import { runChatTurn, dropCopilotSession } from '../../utils/copilot';
+import { createDefaultChatTitle, getFirstUserText } from '../../utils/chatTitle';
 import { SKILLS_DIR, discoverSkills, renderSkillsSystemMessage } from '../../utils/skills';
 import { HIDDEN_SKILL_NAMES } from '../../../shared/utils/skills';
 import type { ProviderConfig } from '@github/copilot-sdk';
@@ -42,14 +43,14 @@ export default defineEventHandler(async (event) => {
     throw createError({ statusCode: 404, statusMessage: 'Chat not found' });
   }
 
-  // Auto-title: first 30 chars of the first user message text
+  if (messages.length < chat.messages.length) {
+    return createNoopChatResponse();
+  }
+
+  // Auto-title: first user message text, shortened near 30 chars without cutting words.
   let newTitle: string | undefined;
   if (!chat.title) {
-    const first = messages.find((m) => m.role === 'user');
-    const firstText = first?.parts?.find((p): p is { type: 'text'; text: string } =>
-      typeof p === 'object' && p !== null && 'type' in p && (p as { type: string }).type === 'text',
-    )?.text ?? 'Untitled chat';
-    newTitle = firstText.slice(0, 30).trim() || 'Untitled chat';
+    newTitle = createDefaultChatTitle(getFirstUserText(messages));
     await db().update(schema.chats).set({ title: newTitle }).where(eq(schema.chats.id, id));
   }
 
@@ -127,3 +128,9 @@ export default defineEventHandler(async (event) => {
     },
   });
 });
+
+function createNoopChatResponse(): Response {
+  return createUIMessageStreamResponse({
+    stream: createUIMessageStream({ execute() {} }),
+  });
+}

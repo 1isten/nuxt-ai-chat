@@ -28,6 +28,7 @@ export { default as chatsIdPost } from './api/chats/[id].post';
 export { default as chatsIdDelete } from './api/chats/[id].delete';
 export { default as messagesDelete } from './api/chats/[id]/messages.delete';
 export { default as titlePatch } from './api/chats/[id]/title.patch';
+export { default as titlePost } from './api/chats/[id]/title.post';
 export { default as visibilityPatch } from './api/chats/[id]/visibility.patch';
 export { default as votesGet } from './api/chats/[id]/votes.get';
 export { default as votesPost } from './api/chats/[id]/votes.post';

@@ -21,12 +21,17 @@ import {
   type SessionEvent,
 } from '@github/copilot-sdk';
 import {
+  generateText,
   createUIMessageStream,
   createUIMessageStreamResponse,
+  type LanguageModel,
   type UIMessage,
   type UIMessageChunk,
 } from 'ai';
+import { createAnthropic } from '@ai-sdk/anthropic';
+import { createOpenAI } from '@ai-sdk/openai';
 import { z } from 'zod';
+import { cleanGeneratedChatTitle } from './chatTitle';
 import type { ModelMetadata, ReasoningEffort, ReasoningEffortValue } from '../../shared/utils/models';
 
 // ---------------------------------------------------------------------------
@@ -275,6 +280,26 @@ RESPONSE QUALITY:
 - Be concise yet comprehensive
 - Use examples when helpful
 - Maintain a friendly, professional tone`;
+
+const TITLE_SYSTEM_MESSAGE = `Generate a short title (max 30 characters) based on the user's message. No quotes or punctuation.
+Return only the title. Do not answer the user's message. Use the user's language when practical.
+
+Good examples:
+User message: what model are you?
+Title: Model Identity
+
+User message: help me debug nuxt auth cookie issue
+Title: Nuxt Auth Debugging
+
+User message: compare files per modality
+Title: Modality File Comparison
+
+Bad examples:
+User message: what model are you?
+Bad title: I'm powered by GPT-4.1
+Bad title: what model are you?`;
+
+const TITLE_GENERATION_TIMEOUT_MS = 20_000;
 
 type SdkReasoningEffort = NonNullable<SessionConfig['reasoningEffort']>;
 
@@ -646,6 +671,126 @@ export async function runChatTurn(args: RunArgs): Promise<Response> {
   });
 
   return createUIMessageStreamResponse({ stream });
+}
+
+export async function generateChatTitle(args: {
+  chatId: string;
+  model: string;
+  provider?: ProviderConfig;
+  prompt: string;
+  signal?: AbortSignal;
+}): Promise<string | null> {
+  const { provider } = args;
+  if (provider) {
+    return await generateChatTitleWithAiSdk({ ...args, provider });
+  }
+
+  return await generateChatTitleWithCopilot(args);
+}
+
+async function generateChatTitleWithAiSdk(args: {
+  model: string;
+  provider: ProviderConfig;
+  prompt: string;
+  signal?: AbortSignal;
+}): Promise<string | null> {
+  if (args.signal?.aborted) return null;
+
+  const model = resolveTitleLanguageModel(args.model, args.provider);
+  if (!model) return null;
+
+  try {
+    const result = await generateText({
+      model,
+      system: TITLE_SYSTEM_MESSAGE,
+      prompt: args.prompt,
+      providerOptions: titleProviderOptions(args.provider),
+      abortSignal: args.signal,
+      timeout: TITLE_GENERATION_TIMEOUT_MS,
+    });
+
+    return cleanGeneratedChatTitle(result.text);
+  } catch {
+    return null;
+  }
+}
+
+async function generateChatTitleWithCopilot(args: {
+  chatId: string;
+  model: string;
+  provider?: ProviderConfig;
+  prompt: string;
+  signal?: AbortSignal;
+}): Promise<string | null> {
+  const client = await getCopilotClient();
+  const sessionId = `title-${args.chatId}-${crypto.randomUUID()}`;
+  const session = await client.createSession({
+    sessionId,
+    model: args.model,
+    streaming: false,
+    onPermissionRequest: approveAll,
+    workingDirectory: _config.workingDirectory,
+    tools: [],
+    availableTools: [],
+    systemMessage: { content: TITLE_SYSTEM_MESSAGE },
+    ...(args.provider ? { provider: args.provider } : {}),
+  });
+
+  const onAbort = () => { void session.abort(); };
+  try {
+    if (args.signal?.aborted) return null;
+    args.signal?.addEventListener('abort', onAbort, { once: true });
+
+    const response = await session.sendAndWait({
+      prompt: args.prompt,
+    }, TITLE_GENERATION_TIMEOUT_MS);
+
+    return cleanGeneratedChatTitle(response?.data.content);
+  } finally {
+    args.signal?.removeEventListener('abort', onAbort);
+    try { await session.disconnect(); } catch { /* ignore */ }
+    try { await client.deleteSession(sessionId); } catch { /* ignore */ }
+  }
+}
+
+function resolveTitleLanguageModel(model: string, provider: ProviderConfig): LanguageModel | null {
+  if ((provider.type ?? 'openai') === 'anthropic') {
+    const anthropic = createAnthropic({
+      baseURL: provider.baseUrl,
+      apiKey: provider.apiKey ?? (provider.bearerToken ? undefined : 'unused'),
+      authToken: provider.bearerToken,
+      headers: provider.headers,
+      name: 'byok-anthropic',
+    });
+    return anthropic(model);
+  }
+
+  if ((provider.type ?? 'openai') === 'openai') {
+    const headers = provider.bearerToken
+      ? { ...provider.headers, Authorization: `Bearer ${provider.bearerToken}` }
+      : provider.headers;
+    const openai = createOpenAI({
+      baseURL: provider.baseUrl,
+      apiKey: provider.apiKey ?? provider.bearerToken ?? 'unused',
+      headers,
+      name: 'byok-openai',
+    });
+    return provider.wireApi === 'responses' ? openai.responses(model) : openai.chat(model);
+  }
+
+  return null;
+}
+
+function titleProviderOptions(provider: ProviderConfig) {
+  if ((provider.type ?? 'openai') === 'anthropic') {
+    return {
+      anthropic: {
+        thinking: { type: 'disabled' },
+      },
+    };
+  }
+
+  return undefined;
 }
 
 // ---------------------------------------------------------------------------
