@@ -59,7 +59,8 @@ All return JSON.
 | `/api/frontend/volview/summary` | Embedded VolView parent-mirrored state: `{ mounted, activeViewID, activeViewDataID, activeViewDataIDByView, lastSlicing, lastSlicingAt, loadingUIDs }`. Use this before answering questions about the current active VolView pane/slice. |
 | `/api/frontend/volview/current` | Detailed active VolView context. Includes the summary fields plus `state`, where `state.activeView`, `state.views`, `state.layout`, `state.currentImage.metadata`, `state.currentSlice.config`, `state.currentSlice.metadata`, `state.currentSlice.dicomTags`, and `state.windowLevel` describe the current viewer pane/image/slice. Use this when the user asks what image/slice/view is currently loaded, needs current image dimensions/spacing/orientation, asks for DICOM tags from the current slice, asks about current window/level, or asks about layout/active pane. `dicomTags` is `null` for non-DICOM data. |
 | `/api/frontend/volview/snapshot` | On-demand active VolView pane snapshot. Returns the active pane context plus `image` as a cropped PNG data URL, `currentSlicePixels` as compact scalar statistics/histogram for 2D views, and optionally `currentSlicePixelGrid` as downsampled scalar rows. Query options: `includeImage=false`, `includeHistogram=false`, `includePixels=true`, `maxWidth=768`, `maxHeight=768`, `bins=64`, `pixelWidth=64`, `pixelHeight=64`. Pixel grids are clamped to 128x128. Use this for visual/screenshot-style prompts, histogram/pixel-summary prompts, or bounded raw-scalar inspection. Do not print the full `image.dataURL` in chat unless explicitly needed; summarize it or omit it with `jq 'del(.image.dataURL)'`. |
-| `POST /api/frontend/volview/roi` | On-demand scalar sampling for a rectangle, polygon, or circle/ellipse on the active 2D VolView slice. Body can be `{ "roi": { "type": "rectangle", "x": 120, "y": 80, "width": 64, "height": 48 } }`, `{ "roi": { "type": "polygon", "points": [[120,80],[180,90],[160,140]] } }`, or `{ "roi": { "type": "circle", "cx": 160, "cy": 110, "radius": 32 } }`. Coordinates are zero-based current-slice image-plane indices, not screen pixels. The response includes `currentSliceRoi.measurements` / `valueRange` computed with the same VolView `roiStats.ts` helpers used by the annotation overlays, plus source image dimensions, plane axes, ROI bounds, histogram, and sampling metadata. Optional body/query fields: `includePixels=true`, `pixelWidth=32`, `pixelHeight=32`, `bins=64`, `maxSamples=262144`, `component=0`. ROI pixel grids are clamped to 128x128 and use `null` outside polygon or ellipse masks. |
+| `POST /api/frontend/volview/roi` | On-demand scalar sampling for a rectangle, polygon, or circle/ellipse on the active 2D VolView slice. Body can be `{ "roi": { "type": "rectangle", "x": 120, "y": 80, "width": 64, "height": 48 } }`, `{ "roi": { "type": "polygon", "points": [[120,80],[180,90],[160,140]] } }`, or `{ "roi": { "type": "circle", "cx": 160, "cy": 110, "radius": 32 } }`. Coordinates are zero-based current-slice image-plane indices, not screen pixels. The response includes `currentSliceRoi.roi` in index-pixel units, `currentSliceRoi.measurements` in VolView physical/world units, `measurementUnits`, `valueRange`, source image dimensions, plane axes, ROI bounds, histogram, and sampling metadata. Optional body/query fields: `includePixels=true`, `pixelWidth=32`, `pixelHeight=32`, `bins=64`, `maxSamples=262144`, `component=0`. ROI pixel grids are clamped to 128x128 and use `null` outside polygon or ellipse masks. |
+| `POST /api/frontend/volview/annotation` | Manage VolView-native overlays on the active 2D pane. Body: `{ "action": "create|update|delete|list", ... }`. Supports `type`: `ruler`, `rectangle`, `circle`, `polygon`. `create` / `update` accept `annotation` geometry in zero-based current-slice image-plane index coordinates, not screen pixels and not millimeters. `delete` uses `annotationId`. `list` returns current-image annotations. Responses include annotation `id`, `imagePlane.geometry` in index-pixel units, `measurements` in VolView physical/world units, and `measurementUnits`. Do not describe `measurements.width` / `measurements.height` as image-plane units; for a DICOM image with spacing, a rectangle created with `width:64,height:48` index pixels may display as smaller/larger physical mm dimensions in VolView. |
 | `/api/frontend/parsed/summary` | `{ patientCount, studyCount, seriesCount, instanceCount, modalityCounts, isParsing }`. **Start here** for "how many / what kinds" questions. |
 | `/api/frontend/parsed/patients` | List of patients with `key`, `PatientName`, `PatientID`, `root`, `studyCount`. |
 | `/api/frontend/parsed/patients/{patientKey}/studies` | Studies under a patient. |
@@ -69,6 +70,16 @@ All return JSON.
 | `/api/frontend/ui/commands` | Lists allowed UI command names. |
 
 `patientKey`, `studyKey`, and `seriesKey` are URL-encoded — pass them with `--data-urlencode` or pre-encode them yourself.
+
+### ROI and annotation reporting rules
+
+- ROI and annotation request coordinates are zero-based current-slice image-plane index coordinates. Call these `index-pixels` or `image-plane indices`, not physical units.
+- `measurements.width`, `measurements.height`, `measurements.area`, `measurements.perimeter`, and ruler `measurements.length` are physical/world measurements. Use `measurementUnits`; normally width/height/perimeter/length are `mm`, area is `mm^2`, and scalar stats are image scalar units.
+- Do not say a non-approximated ROI count is caused by supersampling. The VolView `roiStats.ts` helpers use inclusive endpoint index ranges for rectangle-style bounds. For example, a rectangle from x=120 to x=184 and y=80 to y=128 has `(184 - 120 + 1) * (128 - 80 + 1) = 65 * 49 = 3185` samples, even though the request span was `width:64,height:48`.
+- `sampled: false` means the ROI was not stride-thinned by `maxSamples`; it does not mean supersampled. `sampled: true` means the bridge used a stride because the candidate ROI was larger than `maxSamples`.
+- `roiPixelGrid.rows` from `POST /api/frontend/volview/roi` are nearest-center sampled scalar values over the requested grid. They are not per-cell averages. The grid response says `sampling: nearest-center-with-null-outside-roi`.
+- Polygon ROI measurements have area, perimeter, scalar stats, and count. If you discuss polygon width/height, label it as the image-plane bounding box, not as a polygon physical measurement.
+- Circle requests are normalized internally as ellipse ROI parameters with equal radii. It is fine to say `circle normalized to ellipse with rx=ry`.
 
 ### Snapshot image streaming safety
 
@@ -123,19 +134,20 @@ printf '![volview-preview](h3://localhost/file/%s)\n' "$ENCODED_PATH"
 curl -s -H "Authorization: Bearer $FRONTEND_BRIDGE_TOKEN" \
   "$FRONTEND_BRIDGE_URL/api/frontend/volview/snapshot?includeImage=false&bins=64"
 
-# downsampled scalar grid for the current 2D slice, omitting the PNG image
+# downsampled nearest-value scalar grid for the current 2D slice, omitting the PNG image
 curl -s -H "Authorization: Bearer $FRONTEND_BRIDGE_TOKEN" \
   "$FRONTEND_BRIDGE_URL/api/frontend/volview/snapshot?includeImage=false&includePixels=true&pixelWidth=32&pixelHeight=32"
 
 # rectangle ROI statistics on the current 2D slice; x/y are image-plane indices, not screen pixels
+# sampleCount may exceed width*height because VolView's native stats include endpoint indices.
 curl -s -H "Authorization: Bearer $FRONTEND_BRIDGE_TOKEN" \
   -H "Content-Type: application/json" \
   -X POST \
   -d '{"roi":{"type":"rectangle","x":120,"y":80,"width":64,"height":48},"bins":64}' \
   "$FRONTEND_BRIDGE_URL/api/frontend/volview/roi" \
-  | jq '.currentSliceRoi | {viewName, orientation, slice, coordinateSystem, planeAxes, roi, valueRange, sampleCount, sampled}'
+  | jq '.currentSliceRoi | {viewName, orientation, slice, coordinateSystem, planeAxes, roi, measurements, measurementUnits, valueRange, sampleCount, sampled}'
 
-# polygon ROI with a small bounded sampled grid; values outside the polygon are null
+# polygon ROI with a small bounded nearest-value grid; values outside the polygon are null
 curl -s -H "Authorization: Bearer $FRONTEND_BRIDGE_TOKEN" \
   -H "Content-Type: application/json" \
   -X POST \
@@ -149,6 +161,45 @@ curl -s -H "Authorization: Bearer $FRONTEND_BRIDGE_TOKEN" \
   -d '{"roi":{"type":"circle","cx":160,"cy":110,"radius":32},"bins":64}' \
   "$FRONTEND_BRIDGE_URL/api/frontend/volview/roi" \
   | jq '.currentSliceRoi | {viewName, orientation, slice, roi, measurements, measurementSource}'
+
+# create rectangle annotation overlay on active pane.
+# Input width/height are image-plane index-pixel units; measurements.width/height are physical mm.
+curl -s -H "Authorization: Bearer $FRONTEND_BRIDGE_TOKEN" \
+  -H "Content-Type: application/json" \
+  -X POST \
+  -d '{"action":"create","type":"rectangle","annotation":{"x":120,"y":80,"width":64,"height":48}}' \
+  "$FRONTEND_BRIDGE_URL/api/frontend/volview/annotation" \
+  | jq '.annotation | {id,type,imagePlaneGeometry: .imagePlane.geometry, measurements, measurementUnits}'
+
+# create ruler annotation overlay
+curl -s -H "Authorization: Bearer $FRONTEND_BRIDGE_TOKEN" \
+  -H "Content-Type: application/json" \
+  -X POST \
+  -d '{"action":"create","type":"ruler","annotation":{"x1":120,"y1":80,"x2":180,"y2":92}}' \
+  "$FRONTEND_BRIDGE_URL/api/frontend/volview/annotation" \
+  | jq '.annotation | {id,type,imagePlaneGeometry: .imagePlane.geometry, measurements, measurementUnits}'
+
+# update an annotation by id (move / restyle)
+curl -s -H "Authorization: Bearer $FRONTEND_BRIDGE_TOKEN" \
+  -H "Content-Type: application/json" \
+  -X POST \
+  -d '{"action":"update","annotationId":"<tool-id>","annotation":{"x":130,"y":90,"width":64,"height":48,"color":"#00ff88"}}' \
+  "$FRONTEND_BRIDGE_URL/api/frontend/volview/annotation"
+
+# delete annotation by id
+curl -s -H "Authorization: Bearer $FRONTEND_BRIDGE_TOKEN" \
+  -H "Content-Type: application/json" \
+  -X POST \
+  -d '{"action":"delete","annotationId":"<tool-id>"}' \
+  "$FRONTEND_BRIDGE_URL/api/frontend/volview/annotation"
+
+# list annotations for the current image on active pane context
+curl -s -H "Authorization: Bearer $FRONTEND_BRIDGE_TOKEN" \
+  -H "Content-Type: application/json" \
+  -X POST \
+  -d '{"action":"list"}' \
+  "$FRONTEND_BRIDGE_URL/api/frontend/volview/annotation" \
+  | jq '{count, annotations: [.annotations[] | {id,type,slice,measurements}]}'
 
 # studies for a specific patient (encode the key!)
 PATIENT="John^Doe"
@@ -240,6 +291,7 @@ Both render the chosen instance, but they target different windows. Pick based o
 | "summarize the current slice histogram" / "what is the intensity range" | `GET /api/frontend/volview/snapshot?includeImage=false&bins=64` |
 | "sample the current slice pixels" / "show a downsampled pixel grid" | `GET /api/frontend/volview/snapshot?includeImage=false&includePixels=true&pixelWidth=32&pixelHeight=32`; summarize patterns and avoid dumping all rows unless the user asks. |
 | "measure intensities in this rectangle/polygon/circle/ROI" / "sample this region" | `POST /api/frontend/volview/roi` with rectangle, polygon, or circle/ellipse image-plane coordinates. Read `/api/frontend/volview/current` or use a snapshot first to establish current slice dimensions; do not treat screenshot/screen pixels as ROI coordinates unless you have explicitly mapped them to image-plane indices. Prefer `currentSliceRoi.measurements` when comparing with VolView's visible annotation labels (`Mean`, `Median`, `SDev`, `Sum`, `Max`, `Min`, `P`, `Area`, `W`, `H`). |
+| "draw/add/create annotation overlay" / "move/update/delete this measurement" | `POST /api/frontend/volview/annotation` with `action` = `create`, `update`, `delete`, or `list`. Use `type` `ruler|rectangle|circle|polygon` for create; keep coordinates in current-slice image-plane indices. |
 | "jump to series Z" / "view series Z" | `selectInstance` (keys end at series) |
 | "open this in a new window" | `openInVolView` |
 | "open this file" / "open the source file…" | `openInVolView` |
