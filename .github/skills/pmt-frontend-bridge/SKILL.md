@@ -62,6 +62,7 @@ All return JSON.
 | `POST /api/frontend/volview/roi` | On-demand scalar sampling for a rectangle, polygon, or circle/ellipse on the active 2D VolView slice. Body can be `{ "roi": { "type": "rectangle", "x": 120, "y": 80, "width": 64, "height": 48 } }`, `{ "roi": { "type": "polygon", "points": [[120,80],[180,90],[160,140]] } }`, or `{ "roi": { "type": "circle", "cx": 160, "cy": 110, "radius": 32 } }`. Coordinates are zero-based current-slice image-plane indices, not screen pixels. The response includes `currentSliceRoi.roi` in index-pixel units, `currentSliceRoi.measurements` in VolView physical/world units, `measurementUnits`, `valueRange`, source image dimensions, plane axes, ROI bounds, histogram, and sampling metadata. Optional body/query fields: `includePixels=true`, `pixelWidth=32`, `pixelHeight=32`, `bins=64`, `maxSamples=262144`, `component=0`. ROI pixel grids are clamped to 128x128 and use `null` outside polygon or ellipse masks. |
 | `POST /api/frontend/volview/annotation` | Manage VolView-native overlays on the active 2D pane. Body: `{ "action": "create|update|delete|list", ... }`. Supports `type`: `ruler`, `rectangle`, `circle`, `polygon`. `create` / `update` accept `annotation` geometry in zero-based current-slice image-plane index coordinates, not screen pixels and not millimeters. `delete` uses `annotationId`. `list` returns current-image annotations. Responses include annotation `id`, `imagePlane.geometry` in index-pixel units, `measurements` in VolView physical/world units, and `measurementUnits`. Do not describe `measurements.width` / `measurements.height` as image-plane units; for a DICOM image with spacing, a rectangle created with `width:64,height:48` index pixels may display as smaller/larger physical mm dimensions in VolView. |
 | `POST /api/frontend/volview/segmentation` | Manage VolView-native segment groups and apply a bounded mask to the active 2D slice. Use this only for current-slice masks, not whole-volume masks. `action:"list"` returns segment groups for the current image. `action:"applyMask"` accepts either `{ "roi": { ... }, "threshold": { "min": 100, "max": 300 } }`, `{ "roi": { ... }, "threshold": { "mode": "above", "value": "mean" } }`, `{ "mask": { "x": 120, "y": 80, "rows": [[1,0,1], ...] } }`, or `{ "mask": { "x": 120, "y": 80, "width": 16, "height": 16, "values": [1,0,...] } }`. Coordinates are zero-based current-slice image-plane indices. Threshold values can be numbers or ROI/mask statistics: `mean`, `median`, `min`, `max`, `p25`, `p75`, or `pNN`. Threshold modes: `above`, `below`, `between` (default), and `outside`; optional `delta` shifts the statistic. Optional `seed:{x,y}` with `connectivity:4|8` keeps only the connected component containing the seed after thresholding. Optional fields: `segmentGroupId`, `segmentGroupName`/`groupName`, `newSegmentGroup`, `reuseSegmentGroup`, `segmentValue` 1-255, `segment:{name,color,visible,locked}`, `mode:"add|replace|erase"`, `overwriteExisting`, `maxPixels=262144`, `component=0`. If `segmentGroupId` is omitted for a new add/replace/create/update request, the bridge creates a fresh segment group by default so overlapping AI-generated masks can be toggled independently; that fresh group uses `segment.name` as its display name unless `groupName`/`segmentGroupName` is provided. To add another segment to an existing group, pass `segmentGroupId` or `reuseSegmentGroup:true`. If `segmentValue` is omitted inside a target group, the bridge allocates the next unused segment value. Existing non-background labels are preserved unless `overwriteExisting:true` is sent. The bridge rejects masks over `maxPixels` rather than downsampling. Responses include `segmentationSemantics.version`, `createdSegmentGroup`, segment group metadata, segment metadata, current-slice mask bounds, threshold stats, connected-component counts, skip counts, and plane axes. |
+| `POST /api/frontend/volview/volume` | Bounded whole-volume scalar access. This endpoint is metadata/chunk oriented and never returns an unbounded volume by default. `action:"info"` returns dimensions, spacing, origin, direction, scalar type, component count, raw byte estimate, and chunk limits. `action:"chunk"` returns an explicit IJK source window only: `{ "origin": [i,j,k], "size": [width,height,depth], "stride": [si,sj,sk] }`. `size` is the source-window size before stride, not the number of returned samples. The response includes `chunk.sourceRange`, `chunk.sampledRange`, `chunk.sampleSize`, and `chunk.sampleVoxels`; use those response fields when reporting ranges. Values are flattened `x-fastest-then-y-then-z`. Optional fields: `component=0`, `bins=64`, `includeValues=false` for stats-only, `maxVoxels=262144` (max 1048576), `maxBytes=4194304` (max 16777216). The bridge rejects chunks over the voxel or raw-byte caps; reduce size or increase stride instead of asking for the whole volume. |
 | `/api/frontend/parsed/summary` | `{ patientCount, studyCount, seriesCount, instanceCount, modalityCounts, isParsing }`. **Start here** for "how many / what kinds" questions. |
 | `/api/frontend/parsed/patients` | List of patients with `key`, `PatientName`, `PatientID`, `root`, `studyCount`. |
 | `/api/frontend/parsed/patients/{patientKey}/studies` | Studies under a patient. |
@@ -90,6 +91,11 @@ All return JSON.
 - For `mode:"replace"`, describe the replacement as bounded to the affected current-slice mask bounds. It replaces only the target segment's current-slice pixels unless `overwriteExisting:true` is also used. For whole-slice/whole-volume replacement, ask for a narrower request or wait for the later bounded export/chunk milestone.
 - For natural-language thresholds like "above the ROI mean", use `threshold:{"mode":"above","value":"mean"}` instead of making a separate ROI call unless the user asks to report the ROI stats first. The response includes `currentSliceMask.threshold.stats`.
 - For localized segmentation around a point, use `seed:{"x":...,"y":...}` plus `threshold` to keep only the connected component containing that seed. Use `connectivity:4` by default; use `8` only when diagonal connectivity is desired.
+- Whole-volume access must start with `/api/frontend/volview/volume` `action:"info"`. For data values, request explicit bounded chunks only. Never ask for the whole volume as one normal JSON response unless `info.rawBytes`, requested `sampleVoxels`, `maxVoxels`, and `maxBytes` prove it is within limits.
+- Volume chunk coordinates are image IJK indices, not current-slice image-plane coordinates and not physical mm. `origin` and `size` define a source window: source inclusive range is `origin` through `origin + size - 1`. `stride` chooses samples inside that source window; it does not multiply the source range. For example, `origin:[0,0,0]`, `size:[64,64,4]`, `stride:[2,2,1]` has `sourceRange` i/j/k `[0..63,0..63,0..3]`, `sampledRange` `[0..62,0..62,0..3]`, and `sampleSize` `32x32x4`. Do not describe it as `[0..126,0..126,0..3]`.
+- When summarizing chunk results, prefer the response fields `chunk.sourceRange`, `chunk.sampledRange`, `chunk.sampleSize`, `chunk.sampleVoxels`, `valueRange`, and `histogram`. Do not recalculate displayed ranges unless those fields are absent.
+- Chunk values are flattened with x/i changing fastest, then y/j, then z/k.
+- Treat `/volume` scalar values as raw image scalar values unless metadata clearly establishes calibrated units. Do not call low values "air", "tissue", "HU", "padding", or "background" as a fact unless DICOM modality/rescale context supports that wording. Prefer cautious phrasing such as "uniform low scalar values", "likely background/padding", "less-negative scalar values", or "possible in-volume structure". Avoid saying a chunk is "seeing tissue" solely because the max value is less negative than the corner/background value.
 
 ### Snapshot image streaming safety
 
@@ -251,6 +257,30 @@ curl -s -H "Authorization: Bearer $FRONTEND_BRIDGE_TOKEN" \
   -d '{"action":"applyMask","segment":{"name":"Seed component","color":"#ff66cc"},"roi":{"type":"circle","cx":180,"cy":130,"radius":48},"threshold":{"mode":"above","value":"median"},"seed":{"x":180,"y":130},"connectivity":4}' \
   "$FRONTEND_BRIDGE_URL/api/frontend/volview/segmentation" \
   | jq '{segment: .segment, connectedComponent: .currentSliceMask.connectedComponent, painted: .currentSliceMask.painted}'
+
+# whole-volume metadata only: dimensions, spacing, scalar type, and safe chunk limits
+curl -s -H "Authorization: Bearer $FRONTEND_BRIDGE_TOKEN" \
+  -H "Content-Type: application/json" \
+  -X POST \
+  -d '{"action":"info"}' \
+  "$FRONTEND_BRIDGE_URL/api/frontend/volview/volume" \
+  | jq '{dimensions, spacing, scalarType, components, rawBytes, chunkLimits}'
+
+# bounded volume chunk: explicit IJK source window, x-fastest flattened values
+curl -s -H "Authorization: Bearer $FRONTEND_BRIDGE_TOKEN" \
+  -H "Content-Type: application/json" \
+  -X POST \
+  -d '{"action":"chunk","origin":[0,0,0],"size":[64,64,4],"stride":[2,2,1],"bins":64}' \
+  "$FRONTEND_BRIDGE_URL/api/frontend/volview/volume" \
+  | jq '{chunk: {sourceRange: .chunk.sourceRange, sampledRange: .chunk.sampledRange, sampleSize: .chunk.sampleSize, sampleVoxels: .chunk.sampleVoxels, rawBytes: .chunk.rawBytes, valuesOrder: .chunk.valuesOrder}, valueRange, histogram: .histogram.counts}'
+
+# stats-only bounded volume chunk without returning values
+curl -s -H "Authorization: Bearer $FRONTEND_BRIDGE_TOKEN" \
+  -H "Content-Type: application/json" \
+  -X POST \
+  -d '{"action":"chunk","origin":[0,0,0],"size":[128,128,8],"stride":[2,2,2],"includeValues":false}' \
+  "$FRONTEND_BRIDGE_URL/api/frontend/volview/volume" \
+  | jq '{chunk: {sourceRange: .chunk.sourceRange, sampledRange: .chunk.sampledRange, sampleSize: .chunk.sampleSize, sampleVoxels: .chunk.sampleVoxels, rawBytes: .chunk.rawBytes}, valueRange}'
 
 # studies for a specific patient (encode the key!)
 PATIENT="John^Doe"
