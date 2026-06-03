@@ -61,6 +61,7 @@ All return JSON.
 | `/api/frontend/volview/snapshot` | On-demand active VolView pane snapshot. Returns the active pane context plus `image` as a cropped PNG data URL, `currentSlicePixels` as compact scalar statistics/histogram for 2D views, and optionally `currentSlicePixelGrid` as downsampled scalar rows. Query options: `includeImage=false`, `includeHistogram=false`, `includePixels=true`, `maxWidth=768`, `maxHeight=768`, `bins=64`, `pixelWidth=64`, `pixelHeight=64`. Pixel grids are clamped to 128x128. Use this for visual/screenshot-style prompts, histogram/pixel-summary prompts, or bounded raw-scalar inspection. Do not print the full `image.dataURL` in chat unless explicitly needed; summarize it or omit it with `jq 'del(.image.dataURL)'`. |
 | `POST /api/frontend/volview/roi` | On-demand scalar sampling for a rectangle, polygon, or circle/ellipse on the active 2D VolView slice. Body can be `{ "roi": { "type": "rectangle", "x": 120, "y": 80, "width": 64, "height": 48 } }`, `{ "roi": { "type": "polygon", "points": [[120,80],[180,90],[160,140]] } }`, or `{ "roi": { "type": "circle", "cx": 160, "cy": 110, "radius": 32 } }`. Coordinates are zero-based current-slice image-plane indices, not screen pixels. The response includes `currentSliceRoi.roi` in index-pixel units, `currentSliceRoi.measurements` in VolView physical/world units, `measurementUnits`, `valueRange`, source image dimensions, plane axes, ROI bounds, histogram, and sampling metadata. Optional body/query fields: `includePixels=true`, `pixelWidth=32`, `pixelHeight=32`, `bins=64`, `maxSamples=262144`, `component=0`. ROI pixel grids are clamped to 128x128 and use `null` outside polygon or ellipse masks. |
 | `POST /api/frontend/volview/annotation` | Manage VolView-native overlays on the active 2D pane. Body: `{ "action": "create|update|delete|list", ... }`. Supports `type`: `ruler`, `rectangle`, `circle`, `polygon`. `create` / `update` accept `annotation` geometry in zero-based current-slice image-plane index coordinates, not screen pixels and not millimeters. `delete` uses `annotationId`. `list` returns current-image annotations. Responses include annotation `id`, `imagePlane.geometry` in index-pixel units, `measurements` in VolView physical/world units, and `measurementUnits`. Do not describe `measurements.width` / `measurements.height` as image-plane units; for a DICOM image with spacing, a rectangle created with `width:64,height:48` index pixels may display as smaller/larger physical mm dimensions in VolView. |
+| `POST /api/frontend/volview/segmentation` | Manage VolView-native segment groups and apply a bounded mask to the active 2D slice. Use this only for current-slice masks, not whole-volume masks. `action:"list"` returns segment groups for the current image. `action:"applyMask"` accepts either `{ "roi": { ... }, "threshold": { "min": 100, "max": 300 } }`, `{ "mask": { "x": 120, "y": 80, "rows": [[1,0,1], ...] } }`, or `{ "mask": { "x": 120, "y": 80, "width": 16, "height": 16, "values": [1,0,...] } }`. Coordinates are zero-based current-slice image-plane indices. Optional fields: `segmentGroupId`, `segmentGroupName`/`groupName`, `newSegmentGroup`, `reuseSegmentGroup`, `segmentValue` 1-255, `segment:{name,color,visible,locked}`, `mode:"add|replace|erase"`, `overwriteExisting`, `maxPixels=262144`, `component=0`. If `segmentGroupId` is omitted for a new add/replace/create/update request, the bridge creates a fresh segment group by default so overlapping AI-generated masks can be toggled independently; that fresh group uses `segment.name` as its display name unless `groupName`/`segmentGroupName` is provided. To add another segment to an existing group, pass `segmentGroupId` or `reuseSegmentGroup:true`. If `segmentValue` is omitted inside a target group, the bridge allocates the next unused segment value. Existing non-background labels are preserved unless `overwriteExisting:true` is sent. The bridge rejects masks over `maxPixels` rather than downsampling. Responses include `segmentationSemantics.version`, `createdSegmentGroup`, segment group metadata, segment metadata, current-slice mask bounds, counts, threshold skips, locked skips, existing-label skips, and plane axes. |
 | `/api/frontend/parsed/summary` | `{ patientCount, studyCount, seriesCount, instanceCount, modalityCounts, isParsing }`. **Start here** for "how many / what kinds" questions. |
 | `/api/frontend/parsed/patients` | List of patients with `key`, `PatientName`, `PatientID`, `root`, `studyCount`. |
 | `/api/frontend/parsed/patients/{patientKey}/studies` | Studies under a patient. |
@@ -80,6 +81,13 @@ All return JSON.
 - `roiPixelGrid.rows` from `POST /api/frontend/volview/roi` are nearest-center sampled scalar values over the requested grid. They are not per-cell averages. The grid response says `sampling: nearest-center-with-null-outside-roi`.
 - Polygon ROI measurements have area, perimeter, scalar stats, and count. If you discuss polygon width/height, label it as the image-plane bounding box, not as a polygon physical measurement.
 - Circle requests are normalized internally as ellipse ROI parameters with equal radii. It is fine to say `circle normalized to ellipse with rx=ry`.
+- Segmentation masks are current-slice-only. Do not claim the whole series or whole volume was segmented unless a future chunked/export endpoint was explicitly used.
+- `POST /api/frontend/volview/segmentation` writes VolView-native labelmap segment data. It does not create annotation overlays; use `/annotation` for visual measurement overlays.
+- For natural-language requests like "create a segmentation named X", put the display name in `segment.name`. Use `groupName` / `segmentGroupName` only if the user explicitly asks to name or rename the segment group.
+- When creating a new segmentation from a new ROI/mask, omit both `segmentGroupId` and `segmentValue`. The bridge creates a fresh segment group and uses segment value 1, so overlapping AI-generated masks can be hidden/deleted independently.
+- To add another segment to an existing group, pass `segmentGroupId` (preferred after listing groups) or `reuseSegmentGroup:true`; then omit `segmentValue` to use the next unused value in that group.
+- Existing non-background labels are preserved by default. Send `overwriteExisting:true` only when the user explicitly asks to overwrite or replace existing segmentation pixels.
+- For `mode:"replace"`, describe the replacement as bounded to the affected current-slice mask bounds. It replaces only the target segment's current-slice pixels unless `overwriteExisting:true` is also used. For whole-slice/whole-volume replacement, ask for a narrower request or wait for the later bounded export/chunk milestone.
 
 ### Snapshot image streaming safety
 
@@ -200,6 +208,31 @@ curl -s -H "Authorization: Bearer $FRONTEND_BRIDGE_TOKEN" \
   -d '{"action":"list"}' \
   "$FRONTEND_BRIDGE_URL/api/frontend/volview/annotation" \
   | jq '{count, annotations: [.annotations[] | {id,type,slice,measurements}]}'
+
+# list VolView-native segment groups for the current image
+curl -s -H "Authorization: Bearer $FRONTEND_BRIDGE_TOKEN" \
+  -H "Content-Type: application/json" \
+  -X POST \
+  -d '{"action":"list"}' \
+  "$FRONTEND_BRIDGE_URL/api/frontend/volview/segmentation" \
+  | jq '{count: (.segmentGroups | length), segmentGroups}'
+
+# create a new independently toggleable current-slice segmentation from an ROI threshold.
+# Omit segmentGroupId and segmentValue for a new AI segmentation group.
+curl -s -H "Authorization: Bearer $FRONTEND_BRIDGE_TOKEN" \
+  -H "Content-Type: application/json" \
+  -X POST \
+  -d '{"action":"applyMask","segment":{"name":"AI threshold ROI","color":"#00ff88"},"roi":{"type":"rectangle","x":120,"y":80,"width":64,"height":48},"threshold":{"min":100,"max":300},"mode":"add"}' \
+  "$FRONTEND_BRIDGE_URL/api/frontend/volview/segmentation" \
+  | jq '{segmentGroup: .segmentGroup.id, segment: .segment, mask: .currentSliceMask}'
+
+# apply a small explicit binary mask as a new independently toggleable segmentation
+curl -s -H "Authorization: Bearer $FRONTEND_BRIDGE_TOKEN" \
+  -H "Content-Type: application/json" \
+  -X POST \
+  -d '{"action":"applyMask","segment":{"name":"AI binary mask","color":"#ffcc00"},"mask":{"x":120,"y":80,"rows":[[1,1,0,0],[1,1,1,0],[0,1,1,1]]}}' \
+  "$FRONTEND_BRIDGE_URL/api/frontend/volview/segmentation" \
+  | jq '{segmentGroup: .segmentGroup.id, segment: .segment, painted: .currentSliceMask.painted}'
 
 # studies for a specific patient (encode the key!)
 PATIENT="John^Doe"
