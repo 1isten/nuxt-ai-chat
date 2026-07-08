@@ -1,4 +1,5 @@
 import highlight from '@comark/nuxt/plugins/highlight';
+import math from '@comark/nuxt/plugins/math';
 import html from '@shikijs/langs/html';
 import css from '@shikijs/langs/css';
 import python from '@shikijs/langs/python';
@@ -21,7 +22,9 @@ import SourceLink from './SourceLink.vue';
 
 export default defineComarkComponent({
   name: 'ChatComark',
+  html: false,
   plugins: [
+    math({ throwOnError: false }),
     highlight({
       languages: [html, css, python, sql, go, rust, java, c, cpp, ruby, php, swift, kotlin, diff, dockerfile, xml, toml, graphql],
     }),
