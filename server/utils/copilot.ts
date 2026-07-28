@@ -175,6 +175,34 @@ const weatherZod = z.object({
   location: z.string(),
 });
 
+const findingsZod = z.object({
+  title: z.string().optional(),
+  summary: z.string().optional(),
+  findings: z.array(z.object({
+    label: z.string(),
+    value: z.union([z.string(), z.number()]).optional(),
+    severity: z.enum(['critical', 'warning', 'abnormal', 'normal', 'info']).optional(),
+    detail: z.string().optional(),
+  })),
+});
+
+const histogramZod = z.object({
+  title: z.string().optional(),
+  bins: z.number().min(2).max(256),
+  min: z.number(),
+  max: z.number(),
+  counts: z.array(z.number()),
+  statistics: z.object({
+    mean: z.number(),
+    median: z.number(),
+    stddev: z.number().optional(),
+    min: z.number(),
+    max: z.number(),
+  }).optional(),
+  xLabel: z.string().optional(),
+  yLabel: z.string().optional(),
+});
+
 function getWeatherCondition(k: string) {
   return ({
     'sunny': { text: 'Sunny', icon: 'i-lucide-sun' },
@@ -208,6 +236,18 @@ function buildBuiltInTools() {
     defineTool('area_chart', {
       description: 'Create an AREA chart to emphasize CUMULATIVE MAGNITUDE or COMPOSITION over an ordered axis (typically time). Use when totals matter, especially when stacking multiple series whose sum is itself meaningful (`stacked:true`). For pure trend lines without filled area, prefer `chart`. Do NOT use for discrete independent categories (use bar_chart) or single-point proportions (use donut_chart).',
       parameters: areaChartZod,
+      skipPermission: true,
+      handler: async (input) => input,
+    }),
+    defineTool('findings', {
+      description: 'Present structured ANALYSIS FINDINGS as a professional findings card. Use after performing ROI measurements, segmentation, volume scans, or any quantitative image analysis. Each finding has a label, optional value, severity level (critical/warning/abnormal/normal/info), and optional detail text. The findings card renders with color-coded severity icons and a summary banner — use it for radiologist-style structured reports. Do NOT dump raw data in text when you could present it as findings.',
+      parameters: findingsZod,
+      skipPermission: true,
+      handler: async (input) => input,
+    }),
+    defineTool('histogram', {
+      description: 'Render a PIXEL INTENSITY HISTOGRAM as an interactive bar chart with statistical summary. Use whenever you have histogram data from the frontend bridge (GET /snapshot histogram, POST /roi histogram, or POST /volume scan histogram). Provide bins, min, max, counts array, and optional statistics (mean, median, stddev, min, max). The component renders a professional bar chart with statistics displayed above the bars. Use this instead of printing raw histogram JSON.',
+      parameters: histogramZod,
       skipPermission: true,
       handler: async (input) => input,
     }),

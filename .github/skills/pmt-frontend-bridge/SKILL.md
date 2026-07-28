@@ -49,6 +49,99 @@ If you absolutely cannot use `curl` for some reason, fall back to **`python3`** 
 
 Pipe `curl` output through `jq` for filtering/shaping when needed. If `jq` is missing, parse the raw JSON in your own reasoning rather than reaching for a JS runtime.
 
+## 🎬 Demo Scenarios — Progressive Showcase
+
+When demonstrating this software's AI capabilities to a new user, prefer these high-impact scenarios in order. Each builds on the previous one. Be proactive — after each scenario, briefly explain what just happened in one sentence, then offer the next step.
+
+### Scenario 1: "What do I have here?" — Data Awareness & Charting
+**Goal**: Show that AI sees the user's loaded data and can provide rich statistics.
+
+1. `GET /api/frontend/parsed/stats` — get everything in one call (recommended for demos; use `/summary` only for quick counts)
+2. Use a `bar_chart` to visualize modality distribution
+3. If there's study timeline data, use `chart` (line) to show studies per year
+4. Use a `donut_chart` for modality share if ≤7 modalities
+5. Mention top patients: "Patient X has the most studies (N)"
+6. Say: "You have N patients with M studies across X modalities, spanning from YYYY to YYYY."
+
+**Demo prompt**: "Show me what's loaded and visualize the modalities."
+
+### Scenario 2: "Show me the interesting series" — Navigation & Windowing
+**Goal**: Navigate to a specific series and apply clinical windowing.
+
+1. `GET /api/frontend/parsed/patients/{key}/studies` — pick a study
+2. `GET /api/frontend/parsed/patients/.../series` — find the series with most instances
+3. `selectInstance` to navigate to it
+4. `GET /api/frontend/volview/current` — read current state
+5. Apply a preset window: `volviewSetWindowLevel` (e.g., lung: width 1500, level -600 for CT)
+6. Say: "I've loaded the largest series and applied a lung window."
+
+**Demo prompt**: "Find the series with the most slices, show it to me, and apply the best window setting for lungs."
+
+### Scenario 3: "Measure this region" — ROI Analysis
+**Goal**: Draw a measurement ROI and visualize the pixel statistics.
+
+1. Ensure a 2D slice is visible (from Scenario 2)
+2. `GET /api/frontend/volview/snapshot?includeImage=false&bins=64` — get slice dimensions and histogram
+3. `POST /api/frontend/volview/roi` — sample a region with `includePixels:true`
+4. `POST /api/frontend/volview/annotation` `action:"create"` — draw the measurement overlay
+5. Use a `histogram` tool to visualize the ROI pixel distribution
+6. Say: "I've measured this region — mean intensity is X, area is Y mm²."
+
+**Demo prompt**: "Measure the pixel intensities in the center region of this image and show me the histogram."
+
+### Scenario 4: "Segment the bright areas" — AI Segmentation
+**Goal**: Create a smart segmentation and visualize the result.
+
+1. Ensure a 2D slice is visible
+2. `POST /api/frontend/volview/segmentation` `action:"applyMask"` with `roi`, `threshold` (e.g., `mode:"above", value:"mean"`), and `segment.name`
+3. `POST /api/frontend/volview/roi` on the segmented region — get stats
+4. `GET /api/frontend/volview/snapshot` — get a preview image showing the segmentation
+5. Use a `findings` tool to present segmentation statistics as structured findings
+6. Say: "I segmented X pixels above the mean intensity and created an overlay."
+
+**Demo prompt**: "Segment everything above the mean intensity in this view, measure it, and show me what you found."
+
+### Scenario 5: "Play it like a movie & analyze the volume" — Cine + Volume Scan
+**Goal**: Show dynamic playback AND whole-volume intelligence.
+
+1. `volviewPlayCine { fps: 15, direction: "forward" }` — start cine playback
+2. Let it play for a moment, then `volviewStopCine`
+3. `POST /api/frontend/volview/volume` `action:"scan"` — scan the whole volume with `includeSlices:true`
+4. Use a `chart` (line chart) to plot per-slice mean intensity — reveal the "story" across slices
+5. Use `findings` to present volume statistics
+6. Say: "I scanned the entire volume — the brightest slices are around slice N, and here's the intensity profile across all slices."
+
+**Demo prompt**: "Play this series as a video, then scan the whole volume and tell me which slices are most interesting."
+
+### Scenario 6 (bonus): "Full radiologist workflow"
+**Goal**: Combine everything into a single impressive workflow.
+
+**Demo prompt**: "Act like a radiologist reviewing this study. Navigate to the most informative series, apply appropriate windowing, measure key regions, segment any abnormalities, and give me a structured findings report."
+
+The AI should:
+1. Read parsed data → pick the best series
+2. Navigate + window → show the image properly
+3. ROI sample a central region → histogram
+4. Segment bright/dark regions → overlay
+5. Present a `findings` card with structured observations
+6. Optionally play cine to show the full context
+
+### Scenario 7: "Tag & report" — Labeling + Structured Findings
+**Goal**: Show that AI can create labels, tag items, and build a labeled report.
+
+1. `GET /api/frontend/labeling/definitions` — see existing labels
+2. If no labels exist: `labelCreate { name: "Abnormal", color: "#ff4444" }` and `labelCreate { name: "Reviewed", color: "#4488ff" }`
+3. Navigate to a series and review it (scenarios 2-4)
+4. `labelAssign { keys, label: "Reviewed" }` — mark as reviewed (colored dot appears in tree!)
+5. If anything noteworthy found: `labelAssign { keys, label: "Abnormal" }` + `labelSetDetails { keys, label: "Abnormal", description: "..." }`
+6. `POST /labeling/query { root }` — get all labels for statistics
+7. Use `bar_chart` to visualize label distribution
+8. Use `findings` to present labeled items as a structured report
+
+**Demo prompt**: "Create labels for 'Abnormal' (red), 'Reviewed' (blue), and 'Follow-up' (yellow). Then review the largest series, mark it as Reviewed, and flag anything suspicious."
+
+---
+
 ## Read endpoints (GET)
 
 All return JSON.
@@ -64,10 +157,13 @@ All return JSON.
 | `POST /api/frontend/volview/segmentation` | Manage VolView-native segment groups and apply a bounded mask to the active 2D slice. Use this only for current-slice masks, not whole-volume masks. `action:"list"` returns segment groups for the current image. `action:"applyMask"` accepts either `{ "roi": { ... }, "threshold": { "min": 100, "max": 300 } }`, `{ "roi": { ... }, "threshold": { "mode": "above", "value": "mean" } }`, `{ "mask": { "x": 120, "y": 80, "rows": [[1,0,1], ...] } }`, or `{ "mask": { "x": 120, "y": 80, "width": 16, "height": 16, "values": [1,0,...] } }`. Coordinates are zero-based current-slice image-plane indices. Threshold values can be numbers or ROI/mask statistics: `mean`, `median`, `min`, `max`, `p25`, `p75`, or `pNN`. Threshold modes: `above`, `below`, `between` (default), and `outside`; optional `delta` shifts the statistic. Optional `seed:{x,y}` with `connectivity:4|8` keeps only the connected component containing the seed after thresholding. Optional fields: `segmentGroupId`, `segmentGroupName`/`groupName`, `newSegmentGroup`, `reuseSegmentGroup`, `segmentValue` 1-255, `segment:{name,color,visible,locked}`, `mode:"add|replace|erase"`, `overwriteExisting`, `maxPixels=262144`, `component=0`. If `segmentGroupId` is omitted for a new add/replace/create/update request, the bridge creates a fresh segment group by default so overlapping AI-generated masks can be toggled independently; that fresh group uses `segment.name` as its display name unless `groupName`/`segmentGroupName` is provided. To add another segment to an existing group, pass `segmentGroupId` or `reuseSegmentGroup:true`. If `segmentValue` is omitted inside a target group, the bridge allocates the next unused segment value. Existing non-background labels are preserved unless `overwriteExisting:true` is sent. The bridge rejects masks over `maxPixels` rather than downsampling. Responses include `segmentationSemantics.version`, `createdSegmentGroup`, segment group metadata, segment metadata, current-slice mask bounds, threshold stats, connected-component counts, skip counts, and plane axes. |
 | `POST /api/frontend/volview/volume` | Bounded whole-volume scalar access. This endpoint is metadata/chunk oriented and never returns an unbounded volume by default. `action:"info"` returns dimensions, spacing, origin, direction, scalar type, component count, raw byte estimate, and chunk limits. `action:"chunk"` returns an explicit IJK source window only: `{ "origin": [i,j,k], "size": [width,height,depth], "stride": [si,sj,sk] }`. `size` is the source-window size before stride, not the number of returned samples. The response includes `chunk.sourceRange`, `chunk.sampledRange`, `chunk.sampleSize`, and `chunk.sampleVoxels`; use those response fields when reporting ranges. Values are flattened `x-fastest-then-y-then-z`. Optional fields: `component=0`, `bins=64`, `includeValues=false` for stats-only, `maxVoxels=262144` (max 1048576), `maxBytes=4194304` (max 16777216). `action:"scan"` performs stats-only analysis over a bounded source window or the whole volume by iterating internally bounded chunks; it returns `valueRange`, `histogram`, optional `thresholdCounts`, and optional `sliceSummaries`, never raw scalar values. Scan options: `origin`, `size`, `stride`, `bins=64`, `threshold:{min,max}`, `thresholds:[{name,min,max}]`, strict operators `gt`/`lt`, inclusive operators `gte`/`lte`, `includeSlices`, `maxSliceSummaries=512`, `maxScanVoxels=50000000`, `maxChunkVoxels=262144`, `maxChunkBytes=4194304`. The bridge rejects chunks/scans over caps; increase stride or narrow the source window instead of asking for unbounded raw values. |
 | `/api/frontend/parsed/summary` | `{ patientCount, studyCount, seriesCount, instanceCount, modalityCounts, isParsing }`. **Start here** for "how many / what kinds" questions. |
+| `/api/frontend/parsed/stats` | **Enhanced statistics — preferred over `/summary` for demos.** Returns everything in `/summary` plus: `timeline` (earliest/latest StudyDate, study counts by year), `topPatientsByStudies` / `topPatientsByInstances` (top 10), `topSeries` (top 20 by instance count), `modalityStats` (per-modality series/total/avg/max/min instances, patient count), `patientsByModality` (how many patients have each modality), `fileCounts` (non-DICOM file counts by extension). All computed in a single pass — use this for time-based trends, rankings, and cross-tabulation questions. |
 | `/api/frontend/parsed/patients` | List of patients with `key`, `PatientName`, `PatientID`, `root`, `studyCount`. |
 | `/api/frontend/parsed/patients/{patientKey}/studies` | Studies under a patient. |
 | `/api/frontend/parsed/patients/{patientKey}/studies/{studyKey}/series` | Series under a study. |
 | `/api/frontend/parsed/patients/{patientKey}/studies/{studyKey}/series/{seriesKey}/instances` | **Instances under a series, pre-sorted by `InstanceNumber`.** Returns `{ count, instances, first, last }`. **Use this for any "first / last / Nth instance" question** — do not try to derive ordering from `/state` object keys. |
+| `/api/frontend/labeling/definitions` | Global label definitions: `{ labels: { "LabelName": "#hexcolor", ... } }`. Use this to discover what labels exist before assigning or querying them. |
+| `POST /api/frontend/labeling/query` | Query label assignments. Body: `{ "root": "<rootPath>", "keys": ["patientKey", ...] }` returns `{ labels: ["LabelA", "LabelB"] }`. Omit `keys` (only `root`) to get all assignments for that root. Omit both to get definitions + loaded roots. |
 | `/api/frontend/state` | Full mirror of relevant Pinia state. Larger; only fetch when summaries aren't enough. |
 | `/api/frontend/ui/commands` | Lists allowed UI command names. |
 
@@ -353,6 +449,15 @@ Allowed commands (current whitelist):
 | `volviewSetActiveView` | `{ "viewID": "..." }`, `{ "name": "Axial" }`, `{ "orientation": "Sagittal" }`, or `{ "type": "3D" }` | Focus/select an existing embedded VolView pane. Do **not** use this to change the current pane from axial to sagittal/coronal/3D; use `volviewSetActiveViewType` for that. |
 | `volviewSetActiveViewType` | `{ "name": "Sagittal" }`, `{ "orientation": "Coronal" }`, `{ "type": "3D" }`, or `{ "viewID": "...", "name": "Axial" }` | Change the active embedded VolView pane's view type, matching the in-app view type switcher. This preserves the current pane's image data and does not switch to an `Only` layout. Use this for prompts like "switch to sagittal", "make this view coronal", or "change the current viewer to 3D". |
 | `volviewSetActiveViewMaximized` | `{ "maximized": true }` or `{ "maximized": false }` | Maximize or restore the current active embedded VolView pane. Do not send a `viewID` unless the user explicitly names another pane; for "current viewer", let VolView use its active view. |
+| `volviewPlayCine` | `{ "fps": 10, "direction": "forward" }` or just `{}`  | Start a cine (movie-style) auto-play of slices in the active 2D pane. `fps` defaults to 10 (range 1–60). `direction`: `"forward"` (default, wraps from last to first), `"backward"` (wraps from first to last), or `"pingpong"` (bounces back and forth). Use this for prompts like "play this series", "animate the slices", "start cine". |
+| `volviewStopCine` | _(none)_ | Stop any currently running cine playback. Use for "stop", "pause", "stop playing". Safe to call even if nothing is playing. |
+| `labelCreate` | `{ "name": "Abnormal", "color": "#ff4444" }` | Create a new global label definition with a name and hex color. The label becomes available for assignment to any DICOM item. Returned label dots appear in the patient tree. |
+| `labelRename` | `{ "oldName": "Abnormal", "newName": "Urgent" }` | Rename a global label. Propagates to all existing assignments across all loaded roots in the database. |
+| `labelRecolor` | `{ "name": "Abnormal", "color": "#ff8800" }` | Change the color of an existing global label. Takes effect immediately in the UI. |
+| `labelDelete` | `{ "name": "Abnormal" }` | Delete a global label and remove all its assignments from all loaded roots. |
+| `labelAssign` | `{ "keys": ["patientKey", "studyKey", "seriesKey"], "label": "Abnormal" }` | Assign a label to a DICOM item (patient, study, series, or instance). A colored dot appears next to the item in the tree. Automatically loads label data for the item's root if needed. |
+| `labelRemove` | `{ "keys": ["patientKey", "studyKey", "seriesKey"], "label": "Abnormal" }` | Remove a label assignment from a DICOM item. |
+| `labelSetDetails` | `{ "keys": ["patientKey", ...], "label": "Abnormal", "description": "Mass in left lobe...", "meta": { "size": "2.3cm" }, "files": { "screenshot.png": { "name": "screenshot.png", "type": "image/png" } } }` | Set or update label details (description, metadata, attached files) for a label assignment. If details already exist, they are updated; otherwise created. |
 | `showInFolder` | `{ "keys": [...] }` **(preferred)** or `{ "path": "/abs/path" }` | Reveal in OS file manager. **Always prefer `keys`** — the bridge resolves the real path from the authoritative store. Only fall back to `path` if you have a path that is not in the parsed data; even then, copy it verbatim from a previous bridge response, never retype it (CJK / lookalike characters can silently break `path`). |
 
 ### `selectInstance` vs `openInVolView` — which to use
@@ -386,6 +491,8 @@ Both render the chosen instance, but they target different windows. Pick based o
 | "switch to axial/sagittal/coronal" / "make this view sagittal" | `volviewSetActiveViewType` with the matching `name` or `orientation`. |
 | "focus the sagittal pane" / "select the 3D view" | `volviewSetActiveView` |
 | "maximize this viewer" / "restore the view" | `volviewSetActiveViewMaximized` |
+| "play this series" / "animate the slices" / "start cine" | `volviewPlayCine` with appropriate `direction` and `fps`. |
+| "stop playing" / "pause cine" | `volviewStopCine` |
 | "describe what is visible" / "capture the current viewer" | `GET /api/frontend/volview/snapshot`; use `image.dataURL` as the image input if the runtime supports image attachments, otherwise summarize available metadata and pixel statistics. |
 | "return the image" / "show the image" / "render a preview" | `GET /api/frontend/volview/snapshot`; save the completed `image.dataURL` to a safe temp PNG file, URL-encode the local path, then return `![volview-preview](h3://localhost/file/<already-url-encoded-local-file-path>)`. Never stream the base64 data URL in Markdown. |
 | "summarize the current slice histogram" / "what is the intensity range" | `GET /api/frontend/volview/snapshot?includeImage=false&bins=64` |
@@ -396,6 +503,16 @@ Both render the chosen instance, but they target different windows. Pick based o
 | "open this in a new window" | `openInVolView` |
 | "open this file" / "open the source file…" | `openInVolView` |
 | "pop out / detach this series" | `openInVolView` |
+| "create a label called Abnormal" / "add a red 'Urgent' tag" | `labelCreate` with name + color. |
+| "rename this label to X" | `labelRename` |
+| "change the color of label Y" | `labelRecolor` |
+| "delete this label entirely" | `labelDelete` |
+| "mark this series as reviewed" / "tag this patient" | `labelAssign` with keys + label name. Read `/labeling/definitions` first to know available labels. |
+| "unmark this series" / "remove the label" | `labelRemove` |
+| "add a note to this label" / "write a finding description" | `labelSetDetails` with `description`, optional `meta` and `files`. |
+| "what labels exist?" / "list available tags" | `GET /api/frontend/labeling/definitions`. |
+| "what is this item labeled as?" / "check labels on this series" | `POST /api/frontend/labeling/query` with `root` + `keys`. |
+| "show the distribution of labels" / "how many items are labeled X?" | `POST /api/frontend/labeling/query` with `root` (no keys), then aggregate. Use `bar_chart` for label distribution. |
 
 ### Example
 
@@ -424,6 +541,8 @@ When the user asks to chart, plot, visualize, or graph statistics about their lo
 | **Proportions** of a single whole, **at most 6–7 slices**, values truly sum to a meaningful total | `donut_chart` (set `variant:"pie"` for a solid pie) | "share of modalities in this study", "patient gender split", "% of files by extension" |
 | **Trends** over an **ordered numeric / time axis** (SeriesNumber, InstanceNumber, dates) | `chart` (line) | "image count by SeriesNumber", "studies over time", "value of `<tag>` across instances" |
 | **Cumulative totals or composition** over an ordered axis, especially when stacking multiple series whose sum is meaningful | `area_chart` | "cumulative file count by modality over time", "stacked instances per modality across studies" |
+| **Pixel intensity distributions** (histogram bins from `/snapshot`, `/roi`, or `/volume` endpoints) | `histogram` | "show me the pixel histogram", "intensity distribution for this ROI", "visualize the frequency of HU values" |
+| **Structured analysis findings** with labeled observations, values, severity, and details — especially after ROI measurement or segmentation | `findings` | "summarize your findings", "what did you discover", "give me a structured report of this analysis" |
 
 Rules of thumb:
 
@@ -431,4 +550,30 @@ Rules of thumb:
 - The modality count list (`modalityCounts` from `/parsed/summary`) is **categorical** → `bar_chart` by default.
 - If the user explicitly names a chart type ("plot a pie chart of …", "show me a bar chart of …"), honor it without second-guessing.
 - Never use `chart` (line) for purely categorical x-axes — interpolating a line between unrelated category labels is misleading.
+- Use `histogram` for pixel intensity distributions — it renders as a bar chart with statistical summary (min/max/mean/median/stddev) above the bars.
+- Use `findings` when the user asks for a structured summary of your analysis. Each finding has a `label`, `value`, optional `severity` (critical/warning/abnormal/normal/info), and optional `detail`. This renders as a professional card with color-coded severity icons — much more impressive than raw text.
+- **Horizontal bar chart ordering**: when using `bar_chart` with `horizontal:true` for ranked lists (top patients, top series), **reverse the data array** so the #1 item appears at the top. The chart renders index 0 at the bottom visually, so `data.reverse()` puts the highest-ranked item where users expect it. For vertical bar charts, keep the original order.
 - Always source the numbers from the bridge endpoints (e.g. `/parsed/summary`, `/parsed/patients/.../series`); do not make up values.
+
+## Labeling — global tags and per-item assignments
+
+The host application has a labeling system: **global label definitions** (name + color, stored in localStorage) and **per-item assignments** (which labels are applied to which patient/study/series/instance, stored in SQLite). Labels render as colored dots in the patient tree.
+
+### Typical labeling workflow
+
+1. **Discover**: `GET /api/frontend/labeling/definitions` — see what labels exist
+2. **Create if needed**: `labelCreate { name, color }` — create new labels the user wants
+3. **Query**: `POST /api/frontend/labeling/query { root, keys }` — check current labels on an item
+4. **Assign**: `labelAssign { keys, label }` — tag an item (colored dot appears)
+5. **Detail**: `labelSetDetails { keys, label, description, meta, files }` — add structured notes
+6. **Remove**: `labelRemove { keys, label }` or `labelDelete { name }` — clean up
+
+### Labeling rules of thumb
+
+- **Always check definitions first** — call `GET /labeling/definitions` before suggesting labels, so you don't suggest labels the user hasn't created yet.
+- **Keys use clinical hierarchy**: `[patientKey, studyKey, seriesKey, instanceKey]`. Patient-level = 1 key, study = 2, series = 3, instance = 4. The bridge automatically derives the correct `slot` from key length.
+- **Root is auto-resolved**: the bridge finds the item's `root` from the parsed data, so you don't need to provide it in `keys`.
+- **Color convention**: red (#ff4444) for abnormalities/warnings, green (#44bb44) for normal/benign, yellow (#ffaa00) for follow-up, blue (#4488ff) for reviewed, gray (#888888) for miscellaneous.
+- **Batch labeling**: for "label all CT series", first fetch all series via the parsed endpoints, filter by Modality, then `labelAssign` each one.
+- **Label distribution**: `POST /labeling/query` with only `root` returns all assignments for a root — aggregate by label name and use `bar_chart` to visualize.
+- **Label details persist**: `labelSetDetails` writes to SQLite and survives app restarts.
