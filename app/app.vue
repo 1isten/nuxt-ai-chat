@@ -17,8 +17,11 @@ useHead({
   },
 });
 
-const title = 'AI Chatbot';
-const description = 'AI chatbot made with Nuxt UI.';
+const appTitle = useState('app-title', () => (useRuntimeConfig().public.appTitle || 'AI Chatbot') as string);
+const appDescription = useState('app-description', () => (useRuntimeConfig().public.appDescription || 'AI chatbot made with Nuxt UI.') as string);
+
+const title = appTitle.value;
+const description = appDescription.value;
 
 useSeoMeta({
   title,

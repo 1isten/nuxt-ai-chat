@@ -71,6 +71,9 @@ export default defineNuxtConfig({
       // When the static SPA is served separately from the API, set
       // NUXT_PUBLIC_API_BASE to the API origin. Empty string = same origin.
       apiBase: '',
+
+      appTitle: '', // NUXT_PUBLIC_APP_TITLE
+      appDescription: '', // NUXT_PUBLIC_APP_DESCRIPTION
     },
   },
 

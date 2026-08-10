@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import type { DropdownMenuItem } from '@nuxt/ui';
 
+const appTitle = useState('app-title');
+const appDescription = useState('app-description');
+
 const { loggedIn, openInPopup } = useUserSession();
 const { renameChat, deleteChat } = useChatActions();
 
@@ -84,7 +87,7 @@ defineShortcuts({
       <template #header="{ collapsed }">
         <NuxtLink v-if="!collapsed" to="/" class="flex items-end gap-0.5">
           <Logo class="h-8 w-auto shrink-0" />
-          <span class="text-xl font-bold text-highlighted">Chatbot</span>
+          <span class="text-xl font-bold text-highlighted">{{ appTitle }}</span>
         </NuxtLink>
 
         <UDashboardSidebarCollapse class="ms-auto" />
