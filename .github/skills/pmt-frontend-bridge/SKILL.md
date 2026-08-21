@@ -1,6 +1,6 @@
 ---
 name: pmt-frontend-bridge
-description: Read live state from the host application's frontend (parsed patients/studies/series/instances) and dispatch whitelisted UI commands back to it via the PMT Frontend Bridge.
+description: Read live state from the host application's frontend (parsed patients/studies/series/instances, manual patients, per-patient category branches, Analysis Results, Other Files, source roots, VolView state) and dispatch whitelisted UI commands back to it via the PMT Frontend Bridge.
 ---
 
 # PMT Frontend Bridge
@@ -9,8 +9,9 @@ This skill lets you interact with the host application's frontend while it is ru
 
 - Statistics or summaries of what they have parsed/loaded (patient/study/series/instance counts, modality breakdown, etc.)
 - Listing patients, studies, or series currently visible in the viewer
+- Listing **manual (non-DICOM) patients**, the four per-patient **category branches** (Demographics & Clinical Summary / Clinical Notes / Investigation Reports / Photos and Images), the patient-independent **Analysis Results** tree, and **Other Files**
 - Reading the embedded VolView viewer's parent-mirrored state (mounted status, active view/data IDs, latest slicing event, current image/slice metadata)
-- Performing UI actions on their behalf (open something in the embedded viewer, expand/collapse the tree, reveal a file in the OS file manager)
+- Performing UI actions on their behalf (open something in the embedded viewer, expand/collapse the tree, reveal a file in the OS file manager, create/merge manual patients, add files to Analysis Results)
 
 ## Terminology
 
@@ -48,6 +49,31 @@ The bridge is a plain HTTP+JSON service. Hit it with **`curl`** in a shell comma
 If you absolutely cannot use `curl` for some reason, fall back to **`python3`** (also generally available) with `urllib.request`. Never assume Node or any npm-installed CLI is available.
 
 Pipe `curl` output through `jq` for filtering/shaping when needed. If `jq` is missing, parse the raw JSON in your own reasoning rather than reaching for a JS runtime.
+
+## Project model & data keys (important — read this first)
+
+The app moved to a **Project** model (v6 Phase 0). The bridge now exposes the full, live parsed state — no PHI is stripped. But the shape of that state changed from the old per-root `cache.db` era:
+
+- **Entity keys are opaque `dicomEntityId` UUIDs**, not human-readable strings. Every patient/study/series/instance response carries a `key` (== `dicomEntityId`) plus its display fields (`PatientName`, `StudyDescription`, `SeriesDescription`, `fileName`, …). Treat `key`/`dicomEntityId` as the only stable handle for navigation; map it back to the display name when talking to the user.
+- **File paths are `evidence:` refs** (`evidence:<sourceRootId>:<relativePath>`), not raw filesystem paths. Instances and Other Files expose both the `evidence:` ref (`filePath`) and its `sourceRootId` + `relativePath`. The bridge resolves these for `openInVolView` / `showInFolder` / `addAnalysisResults` automatically.
+- **Source roots** (`GET /api/frontend/project/source-roots`) map each `sourceRootId` → `canonicalPath` (the real folder on disk). A patient's `root` field is a `sourceRootId`, **not** a path.
+- **Manual patients** are non-DICOM patients with no studies: `isManual: true`, `root: "pmtaro:manual-patients"`, empty `studies`. They are listed in `/parsed/patients` alongside DICOM patients and via `GET /api/frontend/parsed/manual-patients`.
+- **Per-patient category branches** (4 fixed keys) render under every patient and hold non-DICOM files (notes, spreadsheets, reports, photos). Their files live in the labeling layer, not in the DICOM `studies` tree — read them via `GET /api/frontend/parsed/categories`. The 4 keys are:
+  - `pmt-patient-demographics-and-clinical-summary` — Demographics & Clinical Summary
+  - `pmt-patient-clinical-notes` — Clinical Notes
+  - `pmt-patient-investigation-reports` — Investigation Reports
+  - `pmt-patient-photos-and-images` — Photos and Images
+- **Analysis Results** is a patient-independent 3-level tree (root → the same 4 category sub-folders → managed-asset files). Read it via `GET /api/frontend/parsed/analysis-results`; it is a `{ categoryKey: [ {assetId, name, extension, mimeType, byteSize}, … ] }` map.
+- **Other Files** (non-DICOM, not attached to any patient) is exposed via `GET /api/frontend/parsed/other-files` as `{ "<extension>": [ {name, path, sourceRootId, relativePath}, … ] }`.
+
+### Quick reference: what each `key` means per level
+
+| Level | `key` (== `dicomEntityId`) maps to | useful display fields on the node |
+|---|---|---|
+| patient | deterministic entity UUID | `PatientName`, `PatientID`, `root`, `isManual` |
+| study | entity UUID | `StudyDescription`, `StudyDate`, `StudyID`, `AccessionNumber` |
+| series | entity UUID | `SeriesDescription`, `Modality`, `SeriesNumber` |
+| instance | entity UUID | `fileName`, `filePath` (`evidence:`), `InstanceNumber`, `SOPInstanceUID`, `sourceRootId`, `relativePath` |
 
 ## 🎬 Demo Scenarios — Progressive Showcase
 
@@ -140,6 +166,19 @@ The AI should:
 
 **Demo prompt**: "Create labels for 'Abnormal' (red), 'Reviewed' (blue), and 'Follow-up' (yellow). Then review the largest series, mark it as Reviewed, and flag anything suspicious."
 
+### Scenario 8: "Project organization" — Manual Patients, Categories & Analysis Results
+**Goal**: Show that AI understands and drives the Project model (manual patients, per-patient categories, Analysis Results).
+
+1. `GET /api/frontend/parsed/manual-patients` — list manual (non-DICOM) patients
+2. `GET /api/frontend/parsed/categories` — see which patients have category files (notes/reports/photos)
+3. `GET /api/frontend/parsed/analysis-results` — see patient-independent analysis outputs
+4. `GET /api/frontend/project/source-roots` — show which folders are loaded
+5. If the user wants a new manual patient: `createManualPatient { patientName, patientId }`
+6. To attach a review note to a patient: `labelSetDetails { keys: [patientKey], label: "pmt-patient-clinical-notes", ... }` — or point the user to the in-app "New Note" on that branch (the bridge exposes reads + manual-patient/analysis-results writes, but per-patient note/spreadsheet *creation* is done in-app)
+7. Say: "You have N DICOM patients, M manual patients, and K folders loaded. Patient X has a Clinical Note and two Investigation Reports."
+
+**Demo prompt**: "Summarize my project — how many DICOM vs manual patients, what category files exist, what's in Analysis Results, and which folders are loaded."
+
 ---
 
 ## Read endpoints (GET)
@@ -158,16 +197,21 @@ All return JSON.
 | `POST /api/frontend/volview/volume` | Bounded whole-volume scalar access. This endpoint is metadata/chunk oriented and never returns an unbounded volume by default. `action:"info"` returns dimensions, spacing, origin, direction, scalar type, component count, raw byte estimate, and chunk limits. `action:"chunk"` returns an explicit IJK source window only: `{ "origin": [i,j,k], "size": [width,height,depth], "stride": [si,sj,sk] }`. `size` is the source-window size before stride, not the number of returned samples. The response includes `chunk.sourceRange`, `chunk.sampledRange`, `chunk.sampleSize`, and `chunk.sampleVoxels`; use those response fields when reporting ranges. Values are flattened `x-fastest-then-y-then-z`. Optional fields: `component=0`, `bins=64`, `includeValues=false` for stats-only, `maxVoxels=262144` (max 1048576), `maxBytes=4194304` (max 16777216). `action:"scan"` performs stats-only analysis over a bounded source window or the whole volume by iterating internally bounded chunks; it returns `valueRange`, `histogram`, optional `thresholdCounts`, and optional `sliceSummaries`, never raw scalar values. Scan options: `origin`, `size`, `stride`, `bins=64`, `threshold:{min,max}`, `thresholds:[{name,min,max}]`, strict operators `gt`/`lt`, inclusive operators `gte`/`lte`, `includeSlices`, `maxSliceSummaries=512`, `maxScanVoxels=50000000`, `maxChunkVoxels=262144`, `maxChunkBytes=4194304`. The bridge rejects chunks/scans over caps; increase stride or narrow the source window instead of asking for unbounded raw values. |
 | `/api/frontend/parsed/summary` | `{ patientCount, studyCount, seriesCount, instanceCount, modalityCounts, isParsing }`. **Start here** for "how many / what kinds" questions. |
 | `/api/frontend/parsed/stats` | **Enhanced statistics — preferred over `/summary` for demos.** Returns everything in `/summary` plus: `timeline` (earliest/latest StudyDate, study counts by year), `topPatientsByStudies` / `topPatientsByInstances` (top 10), `topSeries` (top 20 by instance count), `modalityStats` (per-modality series/total/avg/max/min instances, patient count), `patientsByModality` (how many patients have each modality), `fileCounts` (non-DICOM file counts by extension). All computed in a single pass — use this for time-based trends, rankings, and cross-tabulation questions. |
-| `/api/frontend/parsed/patients` | List of patients with `key`, `PatientName`, `PatientID`, `root`, `studyCount`. |
-| `/api/frontend/parsed/patients/{patientKey}/studies` | Studies under a patient. |
-| `/api/frontend/parsed/patients/{patientKey}/studies/{studyKey}/series` | Series under a study. |
-| `/api/frontend/parsed/patients/{patientKey}/studies/{studyKey}/series/{seriesKey}/instances` | **Instances under a series, pre-sorted by `InstanceNumber`.** Returns `{ count, instances, first, last }`. **Use this for any "first / last / Nth instance" question** — do not try to derive ordering from `/state` object keys. |
-| `/api/frontend/labeling/definitions` | Global label definitions: `{ labels: { "LabelName": "#hexcolor", ... } }`. Use this to discover what labels exist before assigning or querying them. |
-| `POST /api/frontend/labeling/query` | Query label assignments. Body: `{ "root": "<rootPath>", "keys": ["patientKey", ...] }` returns `{ labels: ["LabelA", "LabelB"] }`. Omit `keys` (only `root`) to get all assignments for that root. Omit both to get definitions + loaded roots. |
-| `/api/frontend/state` | Full mirror of relevant Pinia state. Larger; only fetch when summaries aren't enough. |
+| `/api/frontend/parsed/patients` | List of patients with `key` (== `dicomEntityId`), `dicomEntityId`, `PatientName`, `PatientID`, `root` (a `sourceRootId`, or `"pmtaro:manual-patients"` for manual patients), `isManual`, `studyCount`. Manual patients have `studyCount: 0` and no studies. |
+| `/api/frontend/parsed/patients/{patientKey}/studies` | Studies under a patient. Each study has `key`/`dicomEntityId`, `StudyInstanceUID`, `StudyDescription`, `StudyID`, `StudyDate`, `StudyTime`, `AccessionNumber`, `seriesCount`. |
+| `/api/frontend/parsed/patients/{patientKey}/studies/{studyKey}/series` | Series under a study. Each series has `key`/`dicomEntityId`, `SeriesInstanceUID`, `SeriesDescription`, `Modality`, `SeriesNumber`, `instanceCount`. |
+| `/api/frontend/parsed/patients/{patientKey}/studies/{studyKey}/series/{seriesKey}/instances` | **Instances under a series, pre-sorted by `InstanceNumber`.** Returns `{ count, instances, first, last }`. Each instance has `key`/`dicomEntityId`, `SOPInstanceUID`, `InstanceNumber`, `fileName`, `filePath` (`evidence:` ref), `sourceRootId`, `relativePath`, `isVolume`, `cacheKey`. **Use this for any "first / last / Nth instance" question** — do not try to derive ordering from `/state` object keys. |
+| `/api/frontend/parsed/manual-patients` | List of manual (non-DICOM) patients: `{ manualPatients: [{ key, dicomEntityId, PatientName, PatientID, root }] }`. |
+| `/api/frontend/parsed/analysis-results` | Patient-independent Analysis Results as `{ analysisResults: { "<categoryKey>": [{ assetId, name, extension, mimeType, byteSize }] } }`. Category keys are the same 4 keys as the per-patient branches. |
+| `/api/frontend/parsed/other-files` | Non-DICOM "Other Files" as `{ files: { "<extension>": [{ name, path, sourceRootId, relativePath }] } }`. `path` is an `evidence:` ref. |
+| `/api/frontend/parsed/categories` | Per-patient category files as `{ categories: { "<patientKey>": { "<categoryKey>": { "<evidenceRef>": { name, type } } } } }`. Only patients that actually have category files appear. |
+| `/api/frontend/project/source-roots` | `{ sourceRoots: [{ sourceRootId, canonicalPath, displayName, kind, status, addedAt, lastScannedAt }] }`. Use to map a patient's `root` (`sourceRootId`) to its real folder path. |
+| `/api/frontend/labeling/definitions` | Global label definitions: `{ labels: { "LabelName": "#hexcolor", ... }, systemLabels: [ ... ] }`. `systemLabels` are the reserved per-patient category labels — do not rename/recolor/delete them. |
+| `POST /api/frontend/labeling/query` | Query label assignments. Body: `{ "root": "<sourceRootId>", "keys": ["patientKey", ...] }` → `{ root, keys, labels: ["LabelA", ...] }`. Body `{ "root": "<sourceRootId>" }` (no keys) → `{ root, assignments: { "<dicomEntityId>": ["LabelA"] } }`. Body `{}` → `{ labels, systemLabels }` (all definitions). |
+| `/api/frontend/state` | Full mirror of relevant Pinia state (`parsedData`, `volview`, `volviewCurrent`, `labeling`, `project.sourceRoots`). Larger; only fetch when summaries aren't enough. |
 | `/api/frontend/ui/commands` | Lists allowed UI command names. |
 
-`patientKey`, `studyKey`, and `seriesKey` are URL-encoded — pass them with `--data-urlencode` or pre-encode them yourself.
+`patientKey`, `studyKey`, and `seriesKey` are **opaque `dicomEntityId` UUIDs** (not names). They are URL-safe but URL-encode them anyway with `--data-urlencode` or `jq -sRr @uri` when interpolating.
 
 ### ROI and annotation reporting rules
 
@@ -397,11 +441,11 @@ curl -s -H "Authorization: Bearer $FRONTEND_BRIDGE_TOKEN" \
   "$FRONTEND_BRIDGE_URL/api/frontend/volview/volume" \
   | jq '{valueRange, thresholdCounts, sliceSummary}'
 
-# studies for a specific patient (encode the key!)
-PATIENT="John^Doe"
+# studies for a specific patient (the key is an opaque dicomEntityId UUID)
+#   — first fetch the patient key from /parsed/patients, then interpolate it:
+PATIENT_KEY="<dicomEntityId-uuid-from-/parsed/patients>"
 curl -s -H "Authorization: Bearer $FRONTEND_BRIDGE_TOKEN" \
-  --get --data-urlencode "" \
-  "$FRONTEND_BRIDGE_URL/api/frontend/parsed/patients/$(printf %s "$PATIENT" | jq -sRr @uri)/studies"
+  "$FRONTEND_BRIDGE_URL/api/frontend/parsed/patients/$(printf %s "$PATIENT_KEY" | jq -sRr @uri)/studies"
 ```
 
 ### Ordering: first, last, and Nth instance
@@ -427,6 +471,12 @@ Then build the `keys` for `selectInstance` / `openInVolView` from the chosen ins
 ## Write endpoint (POST `/api/frontend/ui/dispatch`)
 
 Body: `{ "command": "<name>", "payload": { ... } }`
+
+**Response is authoritative.** The bridge waits for the renderer to actually run the command and returns:
+- Success → `{ "ok": true, "command": "...", "result": ... }`
+- Failure → HTTP **500** with a message that includes the renderer's error (e.g. `command "labelAssign" failed: unknown label "Reviewed" — create it first with labelCreate`).
+
+**Never report a UI action as done just because you sent it.** Check the HTTP status: a 2xx means it ran; a 4xx/5xx means it did **not** take effect, and you should relay the error (and fix the cause) instead of claiming success.
 
 Allowed commands (current whitelist):
 
@@ -458,7 +508,14 @@ Allowed commands (current whitelist):
 | `labelAssign` | `{ "keys": ["patientKey", "studyKey", "seriesKey"], "label": "Abnormal" }` | Assign a label to a DICOM item (patient, study, series, or instance). A colored dot appears next to the item in the tree. Automatically loads label data for the item's root if needed. |
 | `labelRemove` | `{ "keys": ["patientKey", "studyKey", "seriesKey"], "label": "Abnormal" }` | Remove a label assignment from a DICOM item. |
 | `labelSetDetails` | `{ "keys": ["patientKey", ...], "label": "Abnormal", "description": "Mass in left lobe...", "meta": { "size": "2.3cm" }, "files": { "screenshot.png": { "name": "screenshot.png", "type": "image/png" } } }` | Set or update label details (description, metadata, attached files) for a label assignment. If details already exist, they are updated; otherwise created. |
-| `showInFolder` | `{ "keys": [...] }` **(preferred)** or `{ "path": "/abs/path" }` | Reveal in OS file manager. **Always prefer `keys`** — the bridge resolves the real path from the authoritative store. Only fall back to `path` if you have a path that is not in the parsed data; even then, copy it verbatim from a previous bridge response, never retype it (CJK / lookalike characters can silently break `path`). |
+| `createManualPatient` | `{ "patientName": "Jane Doe", "patientId": "MRN-123" }` | Create a new manual (non-DICOM) patient. `patientName` is required; `patientId` is optional. The patient appears in the tree with only the 4 category branches (no studies). |
+| `deleteManualPatient` | `{ "dicomEntityId": "<patientKey>" }` | Delete a manual patient and its category content. Use `patientName`/`patientId` from `/parsed/manual-patients` to confirm the right one first. |
+| `mergeManualPatient` | `{ "manualEntityId": "<patientKey>", "targetEntityId": "<dicom patientKey>" }` | Merge a manual patient into an existing DICOM patient (manual → DICOM only). Moves the manual patient's label assignments + category files onto the target, then deletes the manual patient. |
+| `addAnalysisResults` | `{ "category": "pmt-patient-investigation-reports", "paths": ["evidence:<root>:<rel>", ...] }` | Add files (as managed assets) to an Analysis Results sub-folder. `paths` may be `evidence:`/`asset:` refs (resolved automatically) or real filesystem paths. |
+| `removeAnalysisResult` | `{ "category": "pmt-patient-investigation-reports", "assetId": "..." }` | Remove a file from an Analysis Results sub-folder. |
+| `createAnalysisResultNote` | `{ "category": "pmt-patient-clinical-notes", "name": "My Note.txt", "content": "..." }` | Create a new note file in an Analysis Results sub-folder. |
+| `createAnalysisResultSpreadsheet` | `{ "category": "pmt-patient-demographics-and-clinical-summary", "name": "Sheet", "csvText": "a,b\n1,2\n", "type": "csv" }` | Create a new CSV/XLSX spreadsheet in an Analysis Results sub-folder. `type` is `"csv"` or `"xlsx"`. |
+| `showInFolder` | `{ "keys": [...] }` **(preferred)** or `{ "path": "/abs/path" }` | Reveal in OS file manager. **Always prefer `keys`** — the bridge resolves the real path (instance `evidence:` ref, or the patient/study/series source root) from the authoritative store. Only fall back to `path` if you have a path that is not in the parsed data; even then, copy it verbatim from a previous bridge response, never retype it (CJK / lookalike characters can silently break `path`). |
 
 ### `selectInstance` vs `openInVolView` — which to use
 
@@ -513,6 +570,16 @@ Both render the chosen instance, but they target different windows. Pick based o
 | "what labels exist?" / "list available tags" | `GET /api/frontend/labeling/definitions`. |
 | "what is this item labeled as?" / "check labels on this series" | `POST /api/frontend/labeling/query` with `root` + `keys`. |
 | "show the distribution of labels" / "how many items are labeled X?" | `POST /api/frontend/labeling/query` with `root` (no keys), then aggregate. Use `bar_chart` for label distribution. |
+| "list manual patients" / "how many non-DICOM patients" | `GET /api/frontend/parsed/manual-patients` (and compare with `/parsed/patients` `isManual`). |
+| "create a patient called X (no DICOM yet)" | `createManualPatient { patientName: "X", patientId?: "..." }`. |
+| "merge this manual patient into patient Y" | `mergeManualPatient { manualEntityId, targetEntityId }` — confirm first (destructive). |
+| "delete this manual patient" | `deleteManualPatient { dicomEntityId }` — confirm first (destructive). |
+| "what's in Analysis Results?" | `GET /api/frontend/parsed/analysis-results`. |
+| "add this file to Analysis Results → Reports" | `addAnalysisResults { category: "pmt-patient-investigation-reports", paths: [...] }`. |
+| "create a note under Analysis Results → Clinical Notes" | `createAnalysisResultNote { category: "pmt-patient-clinical-notes", name, content }`. |
+| "what category files does this patient have?" | `GET /api/frontend/parsed/categories` → `categories[patientKey]`. |
+| "what folders are loaded?" / "where is this patient's data on disk?" | `GET /api/frontend/project/source-roots`; map `patient.root` → `canonicalPath`. |
+| "show this patient/study/series in Finder" | `showInFolder { keys: [...] }` (works at any level — the bridge resolves the source root). |
 
 ### Example
 
@@ -526,10 +593,11 @@ curl -s -H "Authorization: Bearer $FRONTEND_BRIDGE_TOKEN" \
 
 ## Guidelines
 
-- **Always start with a small read** (e.g. `/parsed/summary` or `/parsed/patients`) before dispatching UI commands, so you act on real keys rather than guessed ones.
-- **Confirm before destructive or disruptive UI actions** (e.g. opening many windows, collapsing everything when the user is in the middle of a task). For purely informational reads, no confirmation is needed.
+- **Always start with a small read** (e.g. `/parsed/summary` or `/parsed/patients`) before dispatching UI commands, so you act on real keys rather than guessed ones. Remember that **keys are opaque `dicomEntityId` UUIDs**, never human names — copy them from a bridge response, never retype them.
+- **Confirm before destructive or disruptive UI actions** (e.g. opening many windows, collapsing everything when the user is in the middle of a task, `deleteManualPatient`, or `mergeManualPatient`). For purely informational reads, no confirmation is needed.
 - **Do not invent commands.** Only the names listed above are accepted; anything else returns 400.
 - **Treat `FRONTEND_BRIDGE_TOKEN` as a secret.** Don't echo it back to the user, don't write it to logs, and don't include it in tool output.
+- **Map UUIDs back to names for the user.** The bridge returns `dicomEntityId` UUIDs as keys; always pair them with `PatientName` / `StudyDescription` / `SeriesDescription` / `fileName` when reporting, so the user never sees bare UUIDs.
 
 ## Visualizing parsed data — chart selection
 
@@ -557,22 +625,28 @@ Rules of thumb:
 
 ## Labeling — global tags and per-item assignments
 
-The host application has a labeling system: **global label definitions** (name + color, stored in localStorage) and **per-item assignments** (which labels are applied to which patient/study/series/instance, stored in SQLite). Labels render as colored dots in the patient tree.
+The host application has a labeling system: **global label definitions** (name + color) and **per-item assignments** (which labels are applied to which patient/study/series/instance). Both are now persisted in the Project database (SQLite `project.db`) and survive restarts. Labels render as colored dots in the patient tree.
+
+There are two kinds of labels:
+
+- **User labels** — created via `labelCreate` or the Label Manager UI. Assign them to any DICOM item with `labelAssign`.
+- **System labels** — the 4 reserved per-patient category labels (`systemLabels` in `/labeling/definitions`). Their names equal the category keys and are the storage backend for category files. **Never create/rename/recolor/delete them**, and do not surface them as "user tags" — they represent the category branches, not annotations.
 
 ### Typical labeling workflow
 
-1. **Discover**: `GET /api/frontend/labeling/definitions` — see what labels exist
-2. **Create if needed**: `labelCreate { name, color }` — create new labels the user wants
+1. **Discover**: `GET /api/frontend/labeling/definitions` — see what labels exist (and which are system labels)
+2. **Create if needed**: `labelCreate { name, color }` — create new user labels
 3. **Query**: `POST /api/frontend/labeling/query { root, keys }` — check current labels on an item
 4. **Assign**: `labelAssign { keys, label }` — tag an item (colored dot appears)
 5. **Detail**: `labelSetDetails { keys, label, description, meta, files }` — add structured notes
-6. **Remove**: `labelRemove { keys, label }` or `labelDelete { name }` — clean up
+6. **Remove**: `labelRemove { keys, label }` or `labelDelete { name }` — clean up (only for user labels)
 
 ### Labeling rules of thumb
 
-- **Always check definitions first** — call `GET /labeling/definitions` before suggesting labels, so you don't suggest labels the user hasn't created yet.
-- **Keys use clinical hierarchy**: `[patientKey, studyKey, seriesKey, instanceKey]`. Patient-level = 1 key, study = 2, series = 3, instance = 4. The bridge automatically derives the correct `slot` from key length.
-- **Root is auto-resolved**: the bridge finds the item's `root` from the parsed data, so you don't need to provide it in `keys`.
+- **Always check definitions first** — call `GET /labeling/definitions` before suggesting labels, so you don't suggest labels the user hasn't created yet, and so you don't mistake the 4 system category labels for user tags.
+- **Create the label before assigning it.** `labelAssign` requires the label to already exist (via `labelCreate` or a prior session). If you assign a name that isn't in `/labeling/definitions`, the dispatch returns a 500 with `unknown label "…"` — create it first, then re-assign. Do **not** report success on a 500.
+- **Keys are `dicomEntityId` UUIDs** in clinical hierarchy: `[patientKey, studyKey, seriesKey, instanceKey]`. Patient-level = 1 key, study = 2, series = 3, instance = 4. The bridge automatically derives the correct `slot` from key length.
+- **Root is auto-resolved**: the bridge finds the item's `root` (a `sourceRootId`) from the parsed data, so you don't need to provide it in `keys`.
 - **Color convention**: red (#ff4444) for abnormalities/warnings, green (#44bb44) for normal/benign, yellow (#ffaa00) for follow-up, blue (#4488ff) for reviewed, gray (#888888) for miscellaneous.
 - **Batch labeling**: for "label all CT series", first fetch all series via the parsed endpoints, filter by Modality, then `labelAssign` each one.
 - **Label distribution**: `POST /labeling/query` with only `root` returns all assignments for a root — aggregate by label name and use `bar_chart` to visualize.
