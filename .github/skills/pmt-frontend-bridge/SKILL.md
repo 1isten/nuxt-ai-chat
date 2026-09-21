@@ -1,6 +1,6 @@
 ---
 name: pmt-frontend-bridge
-description: Read live state from the host application's frontend (parsed patients/studies/series/instances, manual patients, per-patient category branches, Analysis Results, Other Files, source roots, VolView state) and dispatch whitelisted UI commands back to it via the PMT Frontend Bridge.
+description: Read live state from the host application's frontend (parsed patients/studies/series/instances, manual patients, per-patient data types, Analysis Results, Other Files, source roots, VolView state) and dispatch whitelisted UI commands back to it via the PMT Frontend Bridge.
 ---
 
 # PMT Frontend Bridge
@@ -9,7 +9,7 @@ This skill lets you interact with the host application's frontend while it is ru
 
 - Statistics or summaries of what they have parsed/loaded (patient/study/series/instance counts, modality breakdown, etc.)
 - Listing patients, studies, or series currently visible in the viewer
-- Listing **manual (non-DICOM) patients**, the four per-patient **category branches** (Demographics & Clinical Summary / Clinical Notes / Investigation Reports / Photos and Images), the patient-independent **Analysis Results** tree, and **Other Files**
+- Listing **manual (non-DICOM) patients**, the ten per-patient **data types** (Demographic Data / Clinical Notes / Summary / Photos and Images / Diagnosis / Blood Tests / Pathology Reports / Procedures / Immunization / Medication / Other), the patient-independent **Analysis Results** tree, and **Other Files**
 - Reading the embedded VolView viewer's parent-mirrored state (mounted status, active view/data IDs, latest slicing event, current image/slice metadata)
 - Performing UI actions on their behalf (open something in the embedded viewer, expand/collapse the tree, reveal a file in the OS file manager, create/merge manual patients, add files to Analysis Results)
 
@@ -58,12 +58,18 @@ The app moved to a **Project** model (v6 Phase 0). The bridge now exposes the fu
 - **File paths are `evidence:` refs** (`evidence:<sourceRootId>:<relativePath>`), not raw filesystem paths. Instances and Other Files expose both the `evidence:` ref (`filePath`) and its `sourceRootId` + `relativePath`. The bridge resolves these for `openInVolView` / `showInFolder` / `addAnalysisResults` automatically.
 - **Source roots** (`GET /api/frontend/project/source-roots`) map each `sourceRootId` → `canonicalPath` (the real folder on disk). A patient's `root` field is a `sourceRootId`, **not** a path.
 - **Manual patients** are non-DICOM patients with no studies: `isManual: true`, `root: "pmtaro:manual-patients"`, empty `studies`. They are listed in `/parsed/patients` alongside DICOM patients and via `GET /api/frontend/parsed/manual-patients`.
-- **Per-patient category branches** (4 fixed keys) render under every patient and hold non-DICOM files (notes, spreadsheets, reports, photos). Their files live in the labeling layer, not in the DICOM `studies` tree — read them via `GET /api/frontend/parsed/categories`. The 4 keys are:
-  - `pmt-patient-demographics-and-clinical-summary` — Demographics & Clinical Summary
-  - `pmt-patient-clinical-notes` — Clinical Notes
-  - `pmt-patient-investigation-reports` — Investigation Reports
+- **Per-patient data types** (10 fixed keys) classify non-DICOM files (notes, spreadsheets, reports, photos). Their files live in the labeling layer, not in the DICOM `studies` tree — read them via `GET /api/frontend/parsed/categories`. The 10 keys are:
+  - `pmt-patient-demographic-data` — Demographic Data
+  - `pmt-patient-clinical-notes-and-summary` — Clinical Notes / Summary
   - `pmt-patient-photos-and-images` — Photos and Images
-- **Analysis Results** is a patient-independent 3-level tree (root → the same 4 category sub-folders → managed-asset files). Read it via `GET /api/frontend/parsed/analysis-results`; it is a `{ categoryKey: [ {assetId, name, extension, mimeType, byteSize}, … ] }` map.
+  - `pmt-patient-diagnosis` — Diagnosis
+  - `pmt-patient-blood-tests` — Blood Tests
+  - `pmt-patient-pathology-reports` — Pathology Reports
+  - `pmt-patient-procedures` — Procedures
+  - `pmt-patient-immunization` — Immunization
+  - `pmt-patient-medication` — Medication
+  - `pmt-patient-other-modality` — Other
+- **Analysis Results** is a patient-independent store for analysis outputs (e.g. a summary spreadsheet the assistant builds from many patients). It is NOT part of the parsed tree — it lives in a toolbar panel opened by the `openAnalysisResults` command (or the chart icon in the drawer toolbar), with one vertical tab per data type. Read it via `GET /api/frontend/parsed/analysis-results`; it is a `{ categoryKey: [ {assetId, name, extension, mimeType, byteSize}, … ] }` map keyed by the same 10 data-type keys. Write to it with `addAnalysisResults` / `createAnalysisResultNote` / `createAnalysisResultSpreadsheet`, then call `openAnalysisResults` to show the result (it focuses the tab and flashes the file row).
 - **Other Files** (non-DICOM, not attached to any patient) is exposed via `GET /api/frontend/parsed/other-files` as `{ "<extension>": [ {name, path, sourceRootId, relativePath}, … ] }`.
 
 ### Quick reference: what each `key` means per level
@@ -174,8 +180,8 @@ The AI should:
 3. `GET /api/frontend/parsed/analysis-results` — see patient-independent analysis outputs
 4. `GET /api/frontend/project/source-roots` — show which folders are loaded
 5. If the user wants a new manual patient: `createManualPatient { patientName, patientId }`
-6. To attach a review note to a patient: `labelSetDetails { keys: [patientKey], label: "pmt-patient-clinical-notes", ... }` — or point the user to the in-app "New Note" on that branch (the bridge exposes reads + manual-patient/analysis-results writes, but per-patient note/spreadsheet *creation* is done in-app)
-7. Say: "You have N DICOM patients, M manual patients, and K folders loaded. Patient X has a Clinical Note and two Investigation Reports."
+6. To attach a review note to a patient: `labelSetDetails { keys: [patientKey], label: "pmt-patient-clinical-notes-and-summary", ... }` — or point the user to the in-app "New Note" on that branch (the bridge exposes reads + manual-patient/analysis-results writes, but per-patient note/spreadsheet *creation* is done in-app)
+7. Say: "You have N DICOM patients, M manual patients, and K folders loaded. Patient X has a Clinical Note and two Pathology Reports."
 
 **Demo prompt**: "Summarize my project — how many DICOM vs manual patients, what category files exist, what's in Analysis Results, and which folders are loaded."
 
@@ -202,7 +208,7 @@ All return JSON.
 | `/api/frontend/parsed/patients/{patientKey}/studies/{studyKey}/series` | Series under a study. Each series has `key`/`dicomEntityId`, `SeriesInstanceUID`, `SeriesDescription`, `Modality`, `SeriesNumber`, `instanceCount`. |
 | `/api/frontend/parsed/patients/{patientKey}/studies/{studyKey}/series/{seriesKey}/instances` | **Instances under a series, pre-sorted by `InstanceNumber`.** Returns `{ count, instances, first, last }`. Each instance has `key`/`dicomEntityId`, `SOPInstanceUID`, `InstanceNumber`, `fileName`, `filePath` (`evidence:` ref), `sourceRootId`, `relativePath`, `isVolume`, `cacheKey`. **Use this for any "first / last / Nth instance" question** — do not try to derive ordering from `/state` object keys. |
 | `/api/frontend/parsed/manual-patients` | List of manual (non-DICOM) patients: `{ manualPatients: [{ key, dicomEntityId, PatientName, PatientID, root }] }`. |
-| `/api/frontend/parsed/analysis-results` | Patient-independent Analysis Results as `{ analysisResults: { "<categoryKey>": [{ assetId, name, extension, mimeType, byteSize }] } }`. Category keys are the same 4 keys as the per-patient branches. |
+| `/api/frontend/parsed/analysis-results` | Patient-independent Analysis Results as `{ analysisResults: { "<categoryKey>": [{ assetId, name, extension, mimeType, byteSize }] } }`. Category keys are the same 10 keys as the per-patient data types. |
 | `/api/frontend/parsed/other-files` | Non-DICOM "Other Files" as `{ files: { "<extension>": [{ name, path, sourceRootId, relativePath }] } }`. `path` is an `evidence:` ref. |
 | `/api/frontend/parsed/categories` | Per-patient category files as `{ categories: { "<patientKey>": { "<categoryKey>": { "<evidenceRef>": { name, type } } } } }`. Only patients that actually have category files appear. |
 | `/api/frontend/project/source-roots` | `{ sourceRoots: [{ sourceRootId, canonicalPath, displayName, kind, status, addedAt, lastScannedAt }] }`. Use to map a patient's `root` (`sourceRootId`) to its real folder path. |
@@ -508,13 +514,14 @@ Allowed commands (current whitelist):
 | `labelAssign` | `{ "keys": ["patientKey", "studyKey", "seriesKey"], "label": "Abnormal" }` | Assign a label to a DICOM item (patient, study, series, or instance). A colored dot appears next to the item in the tree. Automatically loads label data for the item's root if needed. |
 | `labelRemove` | `{ "keys": ["patientKey", "studyKey", "seriesKey"], "label": "Abnormal" }` | Remove a label assignment from a DICOM item. |
 | `labelSetDetails` | `{ "keys": ["patientKey", ...], "label": "Abnormal", "description": "Mass in left lobe...", "meta": { "size": "2.3cm" }, "files": { "screenshot.png": { "name": "screenshot.png", "type": "image/png" } } }` | Set or update label details (description, metadata, attached files) for a label assignment. If details already exist, they are updated; otherwise created. |
-| `createManualPatient` | `{ "patientName": "Jane Doe", "patientId": "MRN-123" }` | Create a new manual (non-DICOM) patient. `patientName` is required; `patientId` is optional. The patient appears in the tree with only the 4 category branches (no studies). |
+| `createManualPatient` | `{ "patientName": "Jane Doe", "patientId": "MRN-123" }` | Create a new manual (non-DICOM) patient. `patientName` is required; `patientId` is optional. The patient appears in the tree with only the 10 data types (no studies). |
 | `deleteManualPatient` | `{ "dicomEntityId": "<patientKey>" }` | Delete a manual patient and its category content. Use `patientName`/`patientId` from `/parsed/manual-patients` to confirm the right one first. |
 | `mergeManualPatient` | `{ "manualEntityId": "<patientKey>", "targetEntityId": "<dicom patientKey>" }` | Merge a manual patient into an existing DICOM patient (manual → DICOM only). Moves the manual patient's label assignments + category files onto the target, then deletes the manual patient. |
-| `addAnalysisResults` | `{ "category": "pmt-patient-investigation-reports", "paths": ["evidence:<root>:<rel>", ...] }` | Add files (as managed assets) to an Analysis Results sub-folder. `paths` may be `evidence:`/`asset:` refs (resolved automatically) or real filesystem paths. |
-| `removeAnalysisResult` | `{ "category": "pmt-patient-investigation-reports", "assetId": "..." }` | Remove a file from an Analysis Results sub-folder. |
-| `createAnalysisResultNote` | `{ "category": "pmt-patient-clinical-notes", "name": "My Note.txt", "content": "..." }` | Create a new note file in an Analysis Results sub-folder. |
-| `createAnalysisResultSpreadsheet` | `{ "category": "pmt-patient-demographics-and-clinical-summary", "name": "Sheet", "csvText": "a,b\n1,2\n", "type": "csv" }` | Create a new CSV/XLSX spreadsheet in an Analysis Results sub-folder. `type` is `"csv"` or `"xlsx"`. |
+| `addAnalysisResults` | `{ "category": "pmt-patient-photos-and-images", "paths": ["evidence:<root>:<rel>", ...] }` | Add files (as managed assets) to an Analysis Results sub-folder. `paths` may be `evidence:`/`asset:` refs (resolved automatically) or real filesystem paths. |
+| `removeAnalysisResult` | `{ "category": "pmt-patient-photos-and-images", "assetId": "..." }` | Remove a file from an Analysis Results sub-folder. |
+| `createAnalysisResultNote` | `{ "category": "pmt-patient-clinical-notes-and-summary", "name": "My Note.txt", "content": "..." }` | Create a new note file in an Analysis Results sub-folder. |
+| `createAnalysisResultSpreadsheet` | `{ "category": "pmt-patient-demographic-data", "name": "Sheet", "csvText": "a,b\n1,2\n", "type": "csv" }` | Create a new CSV/XLSX spreadsheet in an Analysis Results sub-folder. `type` is `"csv"` or `"xlsx"`. |
+| `openAnalysisResults` | `{ "category"?: "pmt-patient-blood-tests", "assetId"?: "<assetId>", "name"?: "summary.xlsx" }` | Open the Analysis Results panel, select that data-type tab and scroll to + flash the file row (matched by `assetId`, else by exact `name`). Call it after writing a file so the user sees the result. Payload is optional (opens the panel on its current tab). |
 | `showInFolder` | `{ "keys": [...] }` **(preferred)** or `{ "path": "/abs/path" }` | Reveal in OS file manager. **Always prefer `keys`** — the bridge resolves the real path (instance `evidence:` ref, or the patient/study/series source root) from the authoritative store. Only fall back to `path` if you have a path that is not in the parsed data; even then, copy it verbatim from a previous bridge response, never retype it (CJK / lookalike characters can silently break `path`). |
 
 ### `selectInstance` vs `openInVolView` — which to use
@@ -575,8 +582,9 @@ Both render the chosen instance, but they target different windows. Pick based o
 | "merge this manual patient into patient Y" | `mergeManualPatient { manualEntityId, targetEntityId }` — confirm first (destructive). |
 | "delete this manual patient" | `deleteManualPatient { dicomEntityId }` — confirm first (destructive). |
 | "what's in Analysis Results?" | `GET /api/frontend/parsed/analysis-results`. |
-| "add this file to Analysis Results → Reports" | `addAnalysisResults { category: "pmt-patient-investigation-reports", paths: [...] }`. |
-| "create a note under Analysis Results → Clinical Notes" | `createAnalysisResultNote { category: "pmt-patient-clinical-notes", name, content }`. |
+| "add this file to Analysis Results → Photos and Images" | `addAnalysisResults { category: "pmt-patient-photos-and-images", paths: [...] }`. |
+| "create a note under Analysis Results → Clinical Notes" | `createAnalysisResultNote { category: "pmt-patient-clinical-notes-and-summary", name, content }`. |
+| "show me that summary file in Analysis Results" | `openAnalysisResults { category, name }` (or `assetId`) — opens the panel, selects the tab and flashes the row. |
 | "what category files does this patient have?" | `GET /api/frontend/parsed/categories` → `categories[patientKey]`. |
 | "what folders are loaded?" / "where is this patient's data on disk?" | `GET /api/frontend/project/source-roots`; map `patient.root` → `canonicalPath`. |
 | "show this patient/study/series in Finder" | `showInFolder { keys: [...] }` (works at any level — the bridge resolves the source root). |
@@ -630,7 +638,7 @@ The host application has a labeling system: **global label definitions** (name +
 There are two kinds of labels:
 
 - **User labels** — created via `labelCreate` or the Label Manager UI. Assign them to any DICOM item with `labelAssign`.
-- **System labels** — the 4 reserved per-patient category labels (`systemLabels` in `/labeling/definitions`). Their names equal the category keys and are the storage backend for category files. **Never create/rename/recolor/delete them**, and do not surface them as "user tags" — they represent the category branches, not annotations.
+- **System labels** — the 10 reserved per-patient data-type labels (`systemLabels` in `/labeling/definitions`). Their names equal the data-type keys and are the storage backend for category files. **Never create/rename/recolor/delete them**, and do not surface them as "user tags" — they represent the data types, not annotations.
 
 ### Typical labeling workflow
 
