@@ -23,7 +23,13 @@ const message = computed(() => {
   })[props.invocation.state as string] || 'Loading analysis...';
 });
 
-const severityConfig: Record<string, { color: string; bg: string; icon: string }> = {
+interface SeverityStyle {
+  color: string;
+  bg: string;
+  icon: string;
+}
+
+const severityConfig: Record<string, SeverityStyle> = {
   critical: { color: 'text-error', bg: 'bg-error/10', icon: 'i-lucide-octagon-alert' },
   warning: { color: 'text-warning', bg: 'bg-warning/10', icon: 'i-lucide-triangle-alert' },
   abnormal: { color: 'text-warning', bg: 'bg-warning/10', icon: 'i-lucide-circle-alert' },
@@ -31,9 +37,12 @@ const severityConfig: Record<string, { color: string; bg: string; icon: string }
   info: { color: 'text-primary', bg: 'bg-primary/10', icon: 'i-lucide-info' },
 };
 
-function severityStyle(severity?: string) {
-  const s = severity || 'info';
-  return severityConfig[s] || severityConfig.info;
+const SEVERITY_FALLBACK: SeverityStyle = { color: 'text-primary', bg: 'bg-primary/10', icon: 'i-lucide-info' };
+
+/** Always resolves to a style, so the template never dereferences undefined. */
+function severityStyle(severity?: string): SeverityStyle {
+  const key = severity || 'info';
+  return Object.hasOwn(severityConfig, key) ? severityConfig[key]! : SEVERITY_FALLBACK;
 }
 
 const findings = computed(() => {
@@ -50,7 +59,26 @@ const summary = computed(() => {
 </script>
 
 <template>
-  <div v-if="invocation.state === 'output-available'" class="my-5">
+  <!-- The tool reports a broken contract as ordinary output with no payload;
+       show the reason instead of falling through to an empty rendered card. -->
+  <div
+    v-if="invocation.state === 'output-available' && invocation.output?.error"
+    class="rounded-xl px-5 py-4 my-5 bg-muted text-error"
+  >
+    <div class="flex items-start gap-2">
+      <UIcon name="i-lucide-triangle-alert" class="size-5 shrink-0 mt-0.5" />
+      <div class="text-sm">
+        <div class="font-medium">
+          Can't render this result
+        </div>
+        <div class="text-muted">
+          {{ invocation.output.error }}
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div v-else-if="invocation.state === 'output-available'" class="my-5">
     <div class="flex items-center gap-2 mb-3">
       <UIcon name="i-lucide-clipboard-list" class="size-5 text-primary shrink-0" />
       <div class="min-w-0">
@@ -66,7 +94,9 @@ const summary = computed(() => {
         v-if="summary"
         class="px-4 py-2.5 bg-elevated/50 border-b border-default"
       >
-        <p class="text-sm text-muted leading-relaxed">{{ summary }}</p>
+        <p class="text-sm text-muted leading-relaxed">
+          {{ summary }}
+        </p>
       </div>
 
       <!-- Findings list -->

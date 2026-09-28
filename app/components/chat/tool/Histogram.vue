@@ -25,6 +25,15 @@ const message = computed(() => {
 
 const output = computed(() => props.invocation.output);
 
+/** Error text reported by the tool's contract check, if any. */
+const chartError = computed(() => {
+  const value = props.invocation.output as unknown as { error?: string } | undefined;
+  return typeof value?.error === 'string' ? value.error : '';
+});
+
+/** The renderable payload; undefined while the tool reported an error. */
+const renderOutput = computed(() => (chartError.value ? undefined : output.value));
+
 const chartData = computed(() => {
   const data = output.value;
   if (!data?.counts || !data?.bins) return [];
@@ -57,18 +66,37 @@ const statistics = computed(() => {
     { label: 'Max', value: formatValue(stats.max) },
     { label: 'Mean', value: formatValue(stats.mean) },
     { label: 'Median', value: formatValue(stats.median) },
-    { label: 'StdDev', value: formatValue(stats.stddev ?? stats.sdev) },
+    { label: 'StdDev', value: formatValue(stats.stddev) },
   ];
 });
 </script>
 
 <template>
-  <div v-if="invocation.state === 'output-available'" class="my-5">
-    <div v-if="output.title" class="flex items-center gap-2 mb-2">
+  <!-- The tool reports a broken contract as ordinary output with no payload;
+       show the reason instead of falling through to an empty rendered card. -->
+  <div
+    v-if="invocation.state === 'output-available' && chartError"
+    class="rounded-xl px-5 py-4 my-5 bg-muted text-error"
+  >
+    <div class="flex items-start gap-2">
+      <UIcon name="i-lucide-triangle-alert" class="size-5 shrink-0 mt-0.5" />
+      <div class="text-sm">
+        <div class="font-medium">
+          Can't render this result
+        </div>
+        <div class="text-muted">
+          {{ chartError }}
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div v-else-if="invocation.state === 'output-available'" class="my-5">
+    <div v-if="renderOutput" class="flex items-center gap-2 mb-2">
       <UIcon name="i-lucide-chart-no-axes-column" class="size-5 text-primary shrink-0" />
       <div class="min-w-0">
         <h3 class="text-lg font-semibold truncate">
-          {{ output.title }}
+          {{ renderOutput?.title }}
         </h3>
       </div>
     </div>
@@ -102,8 +130,8 @@ const statistics = computed(() => {
             :categories="categories"
             x-axis="bin"
             :y-axis="['count']"
-            :x-label="output.xLabel || 'Intensity'"
-            :y-label="output.yLabel || 'Pixel Count'"
+            :x-label="renderOutput?.xLabel || 'Intensity'"
+            :y-label="renderOutput?.yLabel || 'Pixel Count'"
             :y-grid-line="true"
             :hide-legend="true"
             :x-num-ticks="Math.min(8, Math.ceil(chartData.length / 10))"
@@ -118,7 +146,7 @@ const statistics = computed(() => {
                 class="bg-muted/50 rounded-sm px-2 py-1 shadow-lg backdrop-blur-sm max-w-xs ring ring-offset-2 ring-offset-bg ring-default border border-default"
               >
                 <div class="text-xs text-muted">
-                  {{ output.xLabel || 'Intensity' }}: {{ values.bin }}
+                  {{ renderOutput?.xLabel || 'Intensity' }}: {{ values.bin }}
                 </div>
                 <div class="text-sm font-semibold text-highlighted">
                   {{ formatValue(values.count) }} pixels

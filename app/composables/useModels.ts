@@ -116,7 +116,14 @@ export function useModels() {
   async function refreshModels() {
     copilotStatus.value = { state: 'checking' };
     try {
-      const res = await $fetch<ModelsResponse>('/api/models');
+      // Tell the server when this client is local-only, so it does not ask the
+      // (deliberately unauthenticated) Copilot CLI for the hosted catalogue.
+      const wantsOffline = !!provider.value.byok
+        && provider.value.provider?.type === 'ollama'
+        && provider.value.offline !== false;
+      const res = await $fetch<ModelsResponse>('/api/models', {
+        query: wantsOffline ? { offline: 'true' } : undefined,
+      });
 
       ollamaStatus.value = {
         available: res.ollama?.available ?? false,
@@ -125,9 +132,14 @@ export function useModels() {
         message: res.ollama?.message,
       };
 
-      copilotStatus.value = res.copilot?.available === false
-        ? { state: 'unavailable', message: res.copilot.message }
-        : { state: 'available' };
+      // In offline mode the server deliberately does not ask Copilot, so its
+      // "unavailable" answer says nothing about the user's setup — do not turn
+      // it into a warning state.
+      if (!wantsOffline) {
+        copilotStatus.value = res.copilot?.available === false
+          ? { state: 'unavailable', message: res.copilot.message }
+          : { state: 'available' };
+      }
 
       if (res.models?.length) {
         dynamicModels.value = res.models.map(modelToSelectItem);

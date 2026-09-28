@@ -29,7 +29,11 @@ export const chartTool = tool({
     // Create a delay to simulate the input-available state
     await new Promise((resolve) => setTimeout(resolve, 1500));
 
+    // `error` is only set by the server-side tool that performs the real call:
+    // it reports a broken chart contract instead of rendering an empty chart.
+    const error: string | undefined = undefined;
     return {
+      error,
       title,
       data,
       xKey,

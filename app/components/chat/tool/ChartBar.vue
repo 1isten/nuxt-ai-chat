@@ -25,7 +25,7 @@ const message = computed(() => {
 
 const xFormatter = (invocation: BarChartUIToolInvocation) => {
   return (tick: number, _i?: number, _ticks?: number[]): string => {
-    if (!invocation.output?.data[tick]) return '';
+    if (!invocation.output?.data?.[tick]) return '';
     return String(invocation.output.data[tick][invocation.output.xKey] ?? '');
   };
 };
@@ -52,7 +52,26 @@ const formatValue = (value: string | number | undefined): string => {
 </script>
 
 <template>
-  <div v-if="invocation.state === 'output-available'" class="my-5">
+  <!-- The tool reports a broken contract as ordinary output, with no data at
+       all; rendering the chart in that case would crash on the missing array. -->
+  <div
+    v-if="invocation.state === 'output-available' && invocation.output.error"
+    class="rounded-xl px-5 py-4 my-5 bg-muted text-error"
+  >
+    <div class="flex items-start gap-2">
+      <UIcon name="i-lucide-triangle-alert" class="size-5 shrink-0 mt-0.5" />
+      <div class="text-sm">
+        <div class="font-medium">
+          Can't render this chart
+        </div>
+        <div class="text-muted">
+          {{ invocation.output.error }}
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div v-else-if="invocation.state === 'output-available'" class="my-5">
     <div v-if="invocation.output.title" class="flex items-center gap-2 mb-2">
       <UIcon name="i-lucide-bar-chart-3" class="size-5 text-primary shrink-0" />
       <div class="min-w-0">

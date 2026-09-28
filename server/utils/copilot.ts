@@ -254,51 +254,73 @@ process.once('beforeExit', () => { void stopCopilotClient(); });
 // ---------------------------------------------------------------------------
 
 const seriesZod = z.array(z.object({
-  key: z.string(),
-  name: z.string(),
-  color: z.string(),
-})).min(1);
+  key: z.string().describe('Name of the field in each data object that holds this series\' numeric value. It MUST be a real property of every data object (never the series display name or colour).'),
+  name: z.string().describe('Display name for this series in the legend.'),
+  color: z.string().describe('Hex colour for this series (e.g. "#3b82f6").'),
+})).min(1).describe('One entry per plotted series (each becomes a set of bars / a line).');
 
-const xySeriesDataZod = z.array(z.record(z.string(), z.union([z.string(), z.number()]))).min(1);
+const xySeriesDataZod = z.preprocess(
+  coerceRecordArray,
+  z.array(z.record(z.string(), z.union([z.string(), z.number()]))).min(1),
+).describe('The data points themselves: one object per x position. Each object must contain the xKey field plus EVERY series key, and each series-key value must be a NUMBER. Do not put series definitions ({key,name,color} objects) in here. This MUST be a JSON array, not a JSON-encoded string.');
+
+/**
+ * Recover a `data` value the model serialised instead of passing as an array.
+ *
+ * Small models frequently send `"[{\"a\":1}]"` or `"[[{\"a\":1}]]"` for an
+ * array parameter. The mistake is unambiguous to undo, so undo it rather than
+ * failing the call — but never guess at a re-shaping that loses information
+ * (e.g. a `{categories, data:[45,120,380]}` wrapper, whose mapping is a guess).
+ */
+function coerceRecordArray(value: unknown): unknown {
+  let result = value;
+  if (typeof result === 'string') {
+    try { result = JSON.parse(result); } catch { return value; }
+  }
+  if (Array.isArray(result) && result.length === 1 && Array.isArray(result[0])) {
+    result = result[0];
+  }
+  return result;
+}
 
 const chartZod = z.object({
-  title: z.string().optional(),
+  title: z.string().optional().describe('Chart title.'),
   data: xySeriesDataZod,
-  xKey: z.string(),
+  xKey: z.string().describe('Field name in each data object holding the x value (e.g. "month", "date", "index").'),
   series: seriesZod,
-  xLabel: z.string().optional(),
-  yLabel: z.string().optional(),
+  xLabel: z.string().optional().describe('Optional x-axis label.'),
+  yLabel: z.string().optional().describe('Optional y-axis label.'),
 });
 
 const barChartZod = z.object({
-  title: z.string().optional(),
+  title: z.string().optional().describe('Chart title.'),
   data: xySeriesDataZod,
-  xKey: z.string(),
+  xKey: z.string().describe('Field name in each data object holding the CATEGORY label (e.g. "category", "modality", "patient").'),
   series: seriesZod,
-  stacked: z.boolean().optional(),
-  horizontal: z.boolean().optional(),
-  xLabel: z.string().optional(),
-  yLabel: z.string().optional(),
+  stacked: z.boolean().optional().describe('Stack the series into one bar per category instead of grouping them.'),
+  horizontal: z.boolean().optional().describe('Render bars horizontally; prefer this when category labels are long.'),
+  xLabel: z.string().optional().describe('Optional category-axis label.'),
+  yLabel: z.string().optional().describe('Optional value-axis label.'),
 });
 
 const donutChartZod = z.object({
-  title: z.string().optional(),
+  title: z.string().optional().describe('Chart title.'),
   data: z.array(z.object({
-    label: z.string(),
-    value: z.number(),
-    color: z.string(),
-  })).min(2).max(8),
-  variant: z.enum(['donut', 'pie']).optional(),
+    label: z.string().describe('Slice label shown in the legend.'),
+    value: z.number().describe('Slice value (raw counts or percentages both work).'),
+    color: z.string().describe('Hex colour for this slice.'),
+  })).min(2).max(8).describe('One entry per slice (2-8); these values must sum to a meaningful whole.'),
+  variant: z.enum(['donut', 'pie']).optional().describe('"donut" (default) or "pie" — follow the wording the user used.'),
 });
 
 const areaChartZod = z.object({
-  title: z.string().optional(),
+  title: z.string().optional().describe('Chart title.'),
   data: xySeriesDataZod,
-  xKey: z.string(),
+  xKey: z.string().describe('Field name in each data object holding the x value.'),
   series: seriesZod,
-  stacked: z.boolean().optional(),
-  xLabel: z.string().optional(),
-  yLabel: z.string().optional(),
+  stacked: z.boolean().optional().describe('Stack the series so their cumulative sum is shown.'),
+  xLabel: z.string().optional().describe('Optional x-axis label.'),
+  yLabel: z.string().optional().describe('Optional y-axis label.'),
 });
 
 const weatherZod = z.object({
@@ -333,6 +355,130 @@ const histogramZod = z.object({
   yLabel: z.string().optional(),
 });
 
+/**
+ * Catch the most common malformed chart call before it reaches the renderer.
+ *
+ * The xy tools are contract-based: the renderer resolves each `series.key` as a
+ * property of every `data` object. A model that instead fills `data` with
+ * series *definitions* ({key, name, color} objects) still satisfies the types,
+ * but every lookup misses — the chart renders with zero-height bars and "N/A"
+ * tooltips, which looks like a renderer bug and teaches the model nothing.
+ * Returning a described error instead lets the model correct itself.
+ */
+function chartContractIssues(
+  input: { data: Array<Record<string, unknown>>; xKey: string; series: Array<{ key: string }> },
+): string | undefined {
+  const rows = input.data ?? [];
+  if (!rows.length) return 'data must contain at least one object.';
+
+  const problems: string[] = [];
+
+  // `xKey` is the axis label, so it is needed on every point.
+  const withoutXKey = rows.filter((row) => !(input.xKey in row)).length;
+  if (withoutXKey) {
+    problems.push(`xKey "${input.xKey}" is missing from ${withoutXKey} of ${rows.length} data objects (fields found: ${Object.keys(rows[0]!).join(', ')})`);
+  }
+
+  // A series only has to appear *somewhere*: a point may legitimately omit a
+  // series (a gap, or a series that starts later). Only a series that appears
+  // in no point at all is certainly a mistake — it is what a key typo or a
+  // series definition left inside `data` looks like.
+  const missing = input.series
+    .map((serie) => serie.key)
+    .filter((key) => !rows.some((row) => key in row));
+  if (missing.length) {
+    problems.push(
+      `series key(s) ${missing.map((k) => `"${k}"`).join(', ')} do not appear in any data object (fields found: ${Object.keys(rows[0]!).join(', ')})`,
+    );
+  }
+
+  if (!problems.length) return undefined;
+
+  return [
+    `Invalid chart input: ${problems.join('; ')}.`,
+    'Expected shape: each entry of `data` is one data point, e.g.',
+    `{"${input.xKey}":"<category>", "<series key 1>": <number>, "<series key 2>": <number>}`,
+    '— the series keys are the NUMBER fields to plot; series definitions ({key,name,color}) belong in `series`, not in `data`.',
+    'Call the tool again with corrected `data`.',
+  ].join(' ');
+}
+
+/**
+ * Donut/pie contract: each slice needs a label and a numeric value.
+ *
+ * Unlike the xy charts there is no key lookup here, but a malformed slice still
+ * renders as a blank legend entry or an empty arc, which reads as a renderer
+ * bug rather than a bad tool call.
+ */
+function donutContractIssues(input: {
+  data: Array<{ label?: unknown; value?: unknown }>;
+}): string | undefined {
+  const rows = input.data ?? [];
+  if (rows.length < 2) {
+    return `Invalid chart input: at least 2 slices are required, got ${rows.length}. Call the tool again with a corrected \`data\` array.`;
+  }
+  const bad = rows
+    .map((row, index) => ({ index, row }))
+    .filter(({ row }) => !String(row.label ?? '').trim() || typeof row.value !== 'number' || !Number.isFinite(row.value))
+    .map(({ index }) => index);
+  if (!bad.length) return undefined;
+
+  return [
+    `Invalid chart input: slice(s) at index ${bad.join(', ')} are missing a non-empty \`label\` or a numeric \`value\`.`,
+    'Expected shape: `data: [{ "label": "<category>", "value": <number>, "color": "<hex>" }, ...]`.',
+    'Call the tool again with corrected `data`.',
+  ].join(' ');
+}
+
+/**
+ * Histogram contract: the bin metadata must describe the counts array.
+ *
+ * The renderer derives the bar positions from `min`, `max` and `bins`, so an
+ * unsurveyed range or a bin count that disagrees with `counts` produces a
+ * nonsense x-axis rather than an obvious error.
+ */
+function histogramContractIssues(input: {
+  bins: number;
+  min: number;
+  max: number;
+  counts: number[];
+}): string | undefined {
+  if (!input.counts?.length) {
+    return 'Invalid histogram input: `counts` must contain at least one value. Call the tool again with the bin counts for the scanned data.';
+  }
+  if (!(input.max > input.min)) {
+    return `Invalid histogram input: \`max\` (${input.max}) must be greater than \`min\` (${input.min}), because the bin width is derived from that range. Call the tool again with the real value range.`;
+  }
+  if (input.counts.length !== input.bins) {
+    return `Invalid histogram input: \`bins\` is ${input.bins} but \`counts\` has ${input.counts.length} entries; they must be equal, one count per bin. Call the tool again with corrected values.`;
+  }
+  return undefined;
+}
+
+/**
+ * Findings contract: every finding needs a label, because the card renders one
+ * row per entry and an unlabelled row shows up as an empty line.
+ */
+function findingsContractIssues(input: {
+  findings: Array<{ label?: unknown }>;
+}): string | undefined {
+  const rows = input.findings ?? [];
+  if (!rows.length) {
+    return 'Invalid findings input: `findings` must contain at least one entry. Call the tool again with the structured observations.';
+  }
+  const bad = rows
+    .map((row, index) => ({ index, row }))
+    .filter(({ row }) => !String(row.label ?? '').trim())
+    .map(({ index }) => index);
+  if (!bad.length) return undefined;
+
+  return [
+    `Invalid findings input: finding(s) at index ${bad.join(', ')} have no \`label\`.`,
+    'Expected shape: `findings: [{ "label": "<observation>", "value": <optional>, "severity": "<optional>" }, ...]`.',
+    'Call the tool again with corrected `findings`.',
+  ].join(' ');
+}
+
 function getWeatherCondition(k: string) {
   return ({
     'sunny': { text: 'Sunny', icon: 'i-lucide-sun' },
@@ -346,40 +492,90 @@ function getWeatherCondition(k: string) {
 function buildBuiltInTools() {
   return [
     defineTool('chart', {
-      description: 'Create a LINE chart for continuous data on an ORDERED x-axis (time series, dates, sequential indices). Use for trends and how metrics change over an ordered axis. Do NOT use for discrete categories (use bar_chart), proportions of a whole (use donut_chart), or cumulative totals (use area_chart).',
+      description: [
+        'Create a LINE chart for continuous data on an ordered x-axis (time, dates, sequential index).',
+        'Pass exactly this shape — a concrete example with two points and one series:',
+        '{"title":"Value over time","xKey":"month","series":[{"key":"value","name":"Value","color":"#3b82f6"}],"data":[{"month":"Jan","value":12},{"month":"Feb","value":19}]}',
+        'Rules: `xKey` is the field holding the x value and must be present on every data point; each `series[].key` must exist as a field in `data` holding the numbers for that series (a point may omit it when the series has no value there); `data` is a real JSON array (never a JSON string).',
+        'Use chart for ordered axes, bar_chart for categories, donut_chart for parts of a whole, area_chart for cumulative magnitude.',
+        'Call this tool to show the chart. Never print the chart JSON as text or a code block — only the tool call produces a visible chart.',
+      ].join(' '),
       parameters: chartZod,
       skipPermission: true,
-      handler: async (input) => input,
+      handler: async (input) => {
+        const issue = chartContractIssues(input);
+        if (issue) return { error: issue };
+        return input;
+      },
     }),
     defineTool('bar_chart', {
-      description: 'Create a BAR chart to compare DISCRETE INDEPENDENT categories (modalities, patient names, file types, regions). Use whenever the x-axis is a list of category labels rather than an ordered numeric/time axis, especially for counts/sums/comparisons across categories. Supports grouped, stacked (`stacked:true`), and horizontal (`horizontal:true`) layouts. Do NOT use for ordered/continuous axes (use chart), proportions of a whole (use donut_chart). Examples: "instances per modality", "files per patient".',
+      description: [
+        'Create a BAR chart comparing discrete categories (e.g. counts per category).',
+        'Pass exactly this shape — a concrete example with two categories and one series:',
+        '{"title":"Items by size","xKey":"category","series":[{"key":"count","name":"Items","color":"#3b82f6"}],"data":[{"category":"Small","count":45},{"category":"Large","count":380}]}',
+        'Rules: `xKey` is the field holding the category label and must be present on every data point; each `series[].key` must exist as a field in `data` holding the numbers for that series (a point may omit it when the series has no value there); `data` is a real JSON array (never a JSON string); do not repeat the same key across series.',
+        'Use bar_chart for categories, chart for ordered/continuous axes, and donut_chart for parts of a whole.',
+        'Call this tool to show the chart. Never print the chart JSON as text or a code block — only the tool call produces a visible chart.',
+      ].join(' '),
       parameters: barChartZod,
       skipPermission: true,
-      handler: async (input) => input,
+      handler: async (input) => {
+        const issue = chartContractIssues(input);
+        if (issue) return { error: issue };
+        return input;
+      },
     }),
     defineTool('donut_chart', {
-      description: 'Create a DONUT or PIE chart to show PROPORTIONS of a single whole (parts-of-a-total). Use only when values truly sum to a meaningful total AND there are at most 6-7 slices. Default visual is a donut; set `variant:"pie"` for a solid pie. ALWAYS honor user wording: set `variant:"pie"` when the user says "pie"/"pie chart"; set `variant:"donut"` when the user says "donut"/"doughnut"/"ring"; omit `variant` if unspecified. Do NOT use to compare absolute values across categories (use bar_chart). Do NOT use with many categories. Do NOT use for time series. Examples: "share of modalities", "distribution of patient genders".',
+      description: [
+        'Create a DONUT or PIE chart showing proportions of a single whole (2-8 slices).',
+        'Pass exactly this shape:',
+        '{"title":"Share by type","data":[{"label":"CT","value":12,"color":"#3b82f6"},{"label":"MR","value":5,"color":"#10b981"}]}',
+        '`variant` is "donut" (default) or "pie" — follow the wording the user used. Use bar_chart to compare absolute values instead.',
+        'Call this tool to show the chart. Never print the chart JSON as text or a code block — only the tool call produces a visible chart.',
+      ].join(' '),
       parameters: donutChartZod,
       skipPermission: true,
-      handler: async (input) => input,
+      handler: async (input) => {
+        const issue = donutContractIssues(input);
+        if (issue) return { error: issue };
+        return input;
+      },
     }),
     defineTool('area_chart', {
-      description: 'Create an AREA chart to emphasize CUMULATIVE MAGNITUDE or COMPOSITION over an ordered axis (typically time). Use when totals matter, especially when stacking multiple series whose sum is itself meaningful (`stacked:true`). For pure trend lines without filled area, prefer `chart`. Do NOT use for discrete independent categories (use bar_chart) or single-point proportions (use donut_chart).',
+      description: [
+        'Create an AREA chart for cumulative magnitude or composition over an ordered axis.',
+        'Same shape as the line chart: `xKey` names the x field, each `series[].key` must be a numeric field of every `data` object, and `data` is a real JSON array (never a JSON string). Example:',
+        '{"title":"Totals","xKey":"month","series":[{"key":"total","name":"Total","color":"#10b981"}],"data":[{"month":"Jan","total":30},{"month":"Feb","total":55}]}',
+        'Use `chart` for a plain trend line and bar_chart for categories.',
+        'Call this tool to show the chart. Never print the chart JSON as text or a code block — only the tool call produces a visible chart.',
+      ].join(' '),
       parameters: areaChartZod,
       skipPermission: true,
-      handler: async (input) => input,
+      handler: async (input) => {
+        const issue = chartContractIssues(input);
+        if (issue) return { error: issue };
+        return input;
+      },
     }),
     defineTool('findings', {
       description: 'Present structured ANALYSIS FINDINGS as a professional findings card. Use after performing ROI measurements, segmentation, volume scans, or any quantitative image analysis. Each finding has a label, optional value, severity level (critical/warning/abnormal/normal/info), and optional detail text. The findings card renders with color-coded severity icons and a summary banner — use it for radiologist-style structured reports. Do NOT dump raw data in text when you could present it as findings.',
       parameters: findingsZod,
       skipPermission: true,
-      handler: async (input) => input,
+      handler: async (input) => {
+        const issue = findingsContractIssues(input);
+        if (issue) return { error: issue };
+        return input;
+      },
     }),
     defineTool('histogram', {
       description: 'Render a PIXEL INTENSITY HISTOGRAM as an interactive bar chart with statistical summary. Use whenever you have histogram data from the frontend bridge (GET /snapshot histogram, POST /roi histogram, or POST /volume scan histogram). Provide bins, min, max, counts array, and optional statistics (mean, median, stddev, min, max). The component renders a professional bar chart with statistics displayed above the bars. Use this instead of printing raw histogram JSON.',
       parameters: histogramZod,
       skipPermission: true,
-      handler: async (input) => input,
+      handler: async (input) => {
+        const issue = histogramContractIssues(input);
+        if (issue) return { error: issue };
+        return input;
+      },
     }),
     defineTool('weather', {
       description: 'Get weather info with a 5-day forecast for a given location.',
@@ -689,7 +885,8 @@ function translateEvent(event: SessionEvent, state: AdapterState): UIMessageChun
           output: parsed,
         } as unknown as UIMessage['parts'][number]);
       } else {
-        const errorText = error?.message ?? 'Tool execution failed';
+        const errorText = error?.message
+          ?? 'Tool call rejected before execution: the arguments did not match the tool schema. Call the tool again, passing each parameter as the documented JSON type — `data` must be an actual JSON array of objects, not a JSON-encoded string.';
         out.push({
           type: 'tool-output-error',
           toolCallId,
@@ -1139,20 +1336,37 @@ export async function discoverOllamaModels(baseUrl: string): Promise<{
 }
 
 /** Report Copilot model availability plus local Ollama discovery. */
-export async function getCopilotModelsStatus(): Promise<ModelsStatus> {
+export async function getCopilotModelsStatus(options: { offline?: boolean } = {}): Promise<ModelsStatus> {
   const baseUrl = process.env.OLLAMA_BASE_URL || OLLAMA_BASE_URL;
 
+  // In offline mode the CLI is pinned to a local provider and is deliberately
+  // not authenticated with GitHub, so asking it for the Copilot model catalogue
+  // can only fail. Skipping the call also avoids spawning a CLI process that
+  // will never be used for inference.
+  const skipCopilot = options.offline === true;
+
   const [copilotResult, ollamaResult] = await Promise.allSettled([
-    (async () => {
-      const client = await getCopilotClient();
-      return await client.listModels();
-    })(),
+    skipCopilot
+      ? Promise.reject(new OfflineModeError())
+      : (async () => {
+          const client = await getCopilotClient();
+          return await client.listModels();
+        })(),
     discoverOllamaModels(baseUrl),
   ]);
 
-  const models = copilotResult.status === 'fulfilled' ? copilotResult.value.map(mapModelInfo) : [];
-  if (copilotResult.status === 'rejected') {
-    console.error('[copilot] listModels failed', copilotResult.reason);
+  const copilotOk = copilotResult.status === 'fulfilled';
+  const models = copilotOk ? copilotResult.value.map(mapModelInfo) : [];
+
+  if (copilotResult.status === 'rejected' && !(copilotResult.reason instanceof OfflineModeError)) {
+    // Not being signed in is a normal state — local-only users never sign in —
+    // so it does not deserve an error entry with a stack trace. Real failures
+    // (spawn errors, crashes) still do.
+    if (isAuthFailure(copilotResult.reason)) {
+      console.info('[copilot] not signed in; Copilot-hosted models are unavailable');
+    } else {
+      console.error('[copilot] listModels failed', copilotResult.reason);
+    }
   }
 
   // When the local server answers, Copilot auth is irrelevant for the user's
@@ -1164,7 +1378,7 @@ export async function getCopilotModelsStatus(): Promise<ModelsStatus> {
 
   return {
     models,
-    copilot: copilotResult.status === 'fulfilled'
+    copilot: copilotOk
       ? { available: true }
       : { available: false, message: fallbackCopilotMessage },
     ollama: ollamaAvailable
@@ -1175,6 +1389,20 @@ export async function getCopilotModelsStatus(): Promise<ModelsStatus> {
           message: `No Ollama server responded at ${ollamaBaseForMessage(baseUrl)}.`,
         },
   };
+}
+
+/** Distinguishes "not signed in" from real failures (spawn errors, crashes). */
+function isAuthFailure(reason: unknown): boolean {
+  const message = reason instanceof Error ? reason.message : String(reason);
+  return /not authenticated|authenticate first|unauthoriz|\b401\b/i.test(message);
+}
+
+/** Marker for "we intentionally did not ask Copilot", so it is never logged. */
+class OfflineModeError extends Error {
+  constructor() {
+    super('Copilot model listing skipped: offline mode');
+    this.name = 'OfflineModeError';
+  }
 }
 
 function ollamaBaseForMessage(baseUrl: string): string {

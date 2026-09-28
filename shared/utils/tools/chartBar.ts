@@ -29,6 +29,7 @@ export const barChartTool = tool({
   }),
   execute: async ({ title, data, xKey, series, stacked, horizontal, xLabel, yLabel }) => {
     await new Promise((resolve) => setTimeout(resolve, 1500));
-    return { title, data, xKey, series, stacked, horizontal, xLabel, yLabel };
+    // `error` is only set by the server-side tool that performs the real call.
+    return { error: undefined as string | undefined, title, data, xKey, series, stacked, horizontal, xLabel, yLabel };
   },
 });
