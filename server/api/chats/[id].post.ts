@@ -5,33 +5,29 @@ import { z } from 'zod';
 import { db, schema } from '../../utils/db';
 import { getUserSession } from '../../utils/auth';
 import { runChatTurn, dropCopilotSession } from '../../utils/copilot';
+import { providerSchema } from '../../utils/providerSchema';
 import { createDefaultChatTitle, getFirstUserText } from '../../utils/chatTitle';
 import { SKILLS_DIR, discoverSkills, renderSkillsSystemMessage } from '../../utils/skills';
 import { HIDDEN_SKILL_NAMES } from '../../../shared/utils/skills';
-import type { ProviderConfig } from '@github/copilot-sdk';
 import type { ReasoningEffortValue } from '../../../shared/utils/models';
-
-const providerSchema = z.object({
-  type: z.enum(['openai', 'anthropic']).optional(),
-  baseUrl: z.string().url(),
-  apiKey: z.string().optional(),
-  bearerToken: z.string().optional(),
-  wireApi: z.enum(['completions', 'responses']).optional(),
-  headers: z.record(z.string(), z.string()).optional(),
-}).optional();
 
 export default defineEventHandler(async (event) => {
   const session = await getUserSession(event);
 
   const { id } = await getValidatedRouterParams(event, z.object({ id: z.string() }).parse);
 
-  const { model, messages, provider, reasoningEffort, enabledSkills } = await readValidatedBody(event, z.object({
-    model: z.string().min(1),
+  const { model, messages, provider, reasoningEffort, enabledSkills, offline } = await readValidatedBody(event, z.object({
+    // An empty model id reaches the provider as a bare 404 ("Resource not found
+    // on provider"), which explains nothing to the user. Reject it explicitly:
+    // this is exactly what an unconfigured local setup would otherwise send.
+    model: z.string().trim().min(1, 'A model must be selected before sending a message.'),
     messages: z.array(z.custom<UIMessage>()),
     provider: providerSchema,
     reasoningEffort: z.string().trim().min(1).optional(),
     /** Skill names the user has explicitly enabled. */
     enabledSkills: z.array(z.string()).optional(),
+    /** Run the Copilot CLI with `COPILOT_OFFLINE=true` (local providers only). */
+    offline: z.boolean().optional(),
   }).parse);
 
   const userId = session.user?.id || session.id;
@@ -107,7 +103,8 @@ export default defineEventHandler(async (event) => {
   return await runChatTurn({
     chatId: id,
     model,
-    provider: provider as ProviderConfig | undefined,
+    provider,
+    offline,
     reasoningEffort: reasoningEffort as ReasoningEffortValue | undefined,
     prompt: promptText,
     attachments,

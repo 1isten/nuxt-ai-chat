@@ -4,7 +4,7 @@ const loading = ref(false);
 const chatId = crypto.randomUUID();
 
 const { user } = useUserSession();
-const { modelSetupRequired, modelSetupMessage } = useModels();
+const { isOllama, ollamaStatus, modelUnavailable, modelUnavailableMessage } = useModels();
 
 const greeting = computed(() => {
   const hour = new Date().getHours();
@@ -57,7 +57,7 @@ async function createChat(prompt: string) {
 }
 
 async function onSubmit() {
-  if (modelSetupRequired.value) return;
+  if (modelUnavailable.value) return;
   await createChat(input.value);
   clearFiles();
 }
@@ -117,18 +117,18 @@ const quickChats: Array<{ label: string; icon: string }> = [
           </h1>
 
           <UAlert
-            v-if="modelSetupRequired"
+            v-if="modelUnavailable"
             color="warning"
             variant="soft"
             icon="i-lucide-circle-alert"
-            title="GitHub Copilot is not available locally"
-            :description="modelSetupMessage"
+            :title="isOllama ? (ollamaStatus.available ? 'No local model available' : 'Ollama server not reachable') : 'GitHub Copilot is not available locally'"
+            :description="modelUnavailableMessage"
           />
 
           <UChatPrompt
             v-model="input"
             :status="loading ? 'streaming' : 'ready'"
-            :disabled="uploading || modelSetupRequired"
+            :disabled="uploading || modelUnavailable"
             class="[view-transition-name:chat-prompt]"
             variant="subtle"
             :ui="{ base: 'px-1.5' }"
@@ -151,7 +151,7 @@ const quickChats: Array<{ label: string; icon: string }> = [
                 :variant="input ? 'solid' : 'ghost'"
                 icon="i-lucide-send-horizontal"
                 size="sm"
-                :disabled="uploading || modelSetupRequired"
+                :disabled="uploading || modelUnavailable"
               />
             </template>
           </UChatPrompt>

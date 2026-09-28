@@ -5,7 +5,7 @@ import type { UIMessage } from 'ai';
 
 const route = useRoute();
 const toast = useToast();
-const { effectiveModel, effectiveProvider, effectiveReasoningEffort, modelSetupRequired, modelSetupMessage } = useModels();
+const { effectiveModel, effectiveProvider, effectiveReasoningEffort, isOffline, isOllama, ollamaStatus, modelSetupRequired, modelSetupMessage, modelUnavailable, modelUnavailableMessage } = useModels();
 const { enabledSkills } = useSkills();
 const { csrf, headerName } = useCsrf();
 
@@ -42,6 +42,17 @@ const { data: votes } = await useLazyFetch(`/api/chats/${route.params.id}/votes`
 
 const input = ref('');
 
+/**
+ * True from the moment a turn is sent until the stream settles.
+ *
+ * Set explicitly on every send/regenerate rather than inferred from
+ * `chat.status`: the AI SDK flips to `streaming` as soon as the response
+ * *headers* arrive, while the assistant placeholder message is installed a
+ * tick later. A derived indicator therefore flickers off during that gap —
+ * and that gap is exactly where a local model spends its whole prompt prefill.
+ */
+const pendingTurn = ref(false);
+
 const chat = new Chat({
   id: data.value?.id,
   messages: data.value?.messages,
@@ -51,6 +62,7 @@ const chat = new Chat({
     body: () => ({
       model: effectiveModel.value,
       provider: effectiveProvider.value,
+      offline: isOffline.value,
       reasoningEffort: effectiveReasoningEffort.value,
       enabledSkills: enabledSkills.value,
     }),
@@ -66,6 +78,7 @@ const chat = new Chat({
     }
   },
   onError(error) {
+    pendingTurn.value = false;
     let message = error.message;
     if (typeof message === 'string' && message[0] === '{') {
       try {
@@ -83,6 +96,7 @@ const chat = new Chat({
     });
   },
   onFinish: ({ messages }) => {
+    pendingTurn.value = false;
     updateCachedMessages(messages);
     void refreshNuxtData(`chat-${data.value!.id}`);
   },
@@ -139,6 +153,7 @@ async function generateTitleOnce() {
       body: {
         model: effectiveModel.value,
         provider: effectiveProvider.value,
+        offline: isOffline.value,
       },
     });
 
@@ -152,7 +167,10 @@ async function generateTitleOnce() {
 
 async function handleSubmit(e: Event) {
   e.preventDefault();
-  if (input.value.trim() && !uploading.value && !modelSetupRequired.value) {
+  // Sending without a resolved model id would reach the provider as an opaque
+  // "Resource not found" 404, so block it at the source.
+  if (input.value.trim() && !uploading.value && !modelSetupRequired.value && !modelUnavailable.value) {
+    pendingTurn.value = true;
     chat.sendMessage({
       text: input.value,
       files: uploadedFiles.value.length > 0 ? uploadedFiles.value : undefined,
@@ -183,6 +201,7 @@ async function saveEdit(message: UIMessage, text: string) {
   }
 
   editingMessageId.value = null;
+  pendingTurn.value = true;
   chat.sendMessage({ text, messageId: message.id });
 }
 
@@ -198,6 +217,7 @@ async function regenerateMessage(message: UIMessage) {
     return;
   }
 
+  pendingTurn.value = true;
   chat.regenerate({ messageId: message.id });
 }
 
@@ -244,6 +264,7 @@ async function bootstrapInitialAssistantResponse() {
   updateChatData(latest);
 
   if (latest.messages.length === 1) {
+    pendingTurn.value = true;
     chat.regenerate();
   }
 }
@@ -260,6 +281,56 @@ watch(
   () => { void generateTitleOnce(); },
   { immediate: true },
 );
+
+/**
+ * The wait before any content exists. For a local model this is prompt prefill:
+ * the provider must read the entire system prompt and tool definitions before
+ * the first token can be produced, and a new session has no cached prefix to
+ * reuse. On a fast host it is imperceptible; locally it dominates a new chat.
+ */
+const awaitingFirstToken = computed(() => {
+  if (!pendingTurn.value) return false;
+  const messages = chat.messages as UIMessage[];
+  return !messages.some(hasSubstantiveContent);
+});
+
+/**
+ * Whether a message carries anything a user can actually see.
+ *
+ * Counting parts is not enough: the server writes its first chunks (the
+ * assistant `start` and a `data-chat-title`) before the model has produced
+ * anything, so the placeholder already holds an *empty* text part for the whole
+ * wait. Only non-empty text/reasoning or a tool call means the model has begun.
+ */
+function hasSubstantiveContent(message: UIMessage): boolean {
+  if (message.role !== 'assistant') return false;
+  return (message.parts ?? []).some((part) => {
+    if (part.type === 'text' || part.type === 'reasoning') return !!part.text?.trim();
+    if (part.type.startsWith('tool-')) return true;
+    // Side-channel parts (chat title, files, sources…) are not model output and
+    // must not be mistaken for the answer having started.
+    return false;
+  });
+}
+
+/** Explain the wait only where it is actually long: a local model. */
+const showFirstTokenNote = computed(() => awaitingFirstToken.value && isOllama.value);
+
+/**
+ * Sentinel id for the inline waiting row. It is styled like an assistant
+ * message and rendered through the normal message flow so it inherits the list
+ * spacing and alignment instead of floating below the whole list.
+ */
+const WAITING_ROW_ID = '__waiting-for-first-token__';
+
+const renderMessages = computed<UIMessage[]>(() => {
+  const messages = chat.messages as UIMessage[];
+  if (!awaitingFirstToken.value) return messages;
+  // `parts` must be non-empty: UChatMessages skips messages without parts, and
+  // the placeholder part is never rendered because we own the #content slot.
+  const row = { id: WAITING_ROW_ID, role: 'assistant', parts: [{ type: 'step-start' }] } as unknown as UIMessage;
+  return [...messages, row];
+});
 </script>
 
 <template>
@@ -297,19 +368,11 @@ watch(
         <UContainer class="flex-1 flex flex-col gap-4 sm:gap-6">
           <UChatMessages
             should-auto-scroll
-            :messages="chat.messages"
+            :messages="renderMessages"
             :status="chat.status"
             :spacing-offset="isOwner ? 160 : 0"
             class="pt-(--ui-header-height) pb-4 sm:pb-6"
           >
-            <template #indicator>
-              <div class="flex items-center gap-1.5">
-                <ChatIndicator />
-
-                <UChatShimmer text="Thinking…" class="text-sm" />
-              </div>
-            </template>
-
             <template #files="{ message, parts }">
               <ChatFilePreview
                 v-for="(part, index) in parts"
@@ -322,7 +385,19 @@ watch(
             </template>
 
             <template #content="{ message }">
+              <!-- Inline waiting row: the local model is reading the whole prompt
+                   before it can emit anything. Rendered as a message so it sits
+                   flush with the rest of the conversation. -->
+              <div v-if="message.id === WAITING_ROW_ID" class="flex flex-wrap items-center gap-x-2 gap-y-1 text-pretty text-sm">
+                <ChatIndicator />
+                <UChatShimmer text="Waiting for first token…" class="text-sm" />
+                <span v-if="showFirstTokenNote" class="w-full text-muted">
+                  This may take a while for local models — depending on the hardware
+                </span>
+              </div>
+
               <ChatMessageContent
+                v-else
                 :message="message"
                 :editing="isOwner && editingMessageId === message.id"
                 @save="saveEdit"
@@ -344,19 +419,19 @@ watch(
           </UChatMessages>
 
           <UAlert
-            v-if="isOwner && modelSetupRequired"
+            v-if="isOwner && modelUnavailable"
             color="warning"
             variant="soft"
             icon="i-lucide-circle-alert"
-            title="GitHub Copilot is not available locally"
-            :description="modelSetupMessage"
+            :title="isOllama ? (ollamaStatus.available ? 'No local model available' : 'Ollama server not reachable') : 'GitHub Copilot is not available locally'"
+            :description="modelUnavailableMessage"
           />
 
           <UChatPrompt
             v-if="isOwner"
             v-model="input"
             :error="chat.error"
-            :disabled="uploading || modelSetupRequired"
+            :disabled="uploading || modelUnavailable"
             variant="subtle"
             class="sticky bottom-0 [view-transition-name:chat-prompt] rounded-b-none z-10"
             :ui="{ base: 'px-1.5' }"
@@ -386,7 +461,7 @@ watch(
                 streaming-icon="i-mdi-square-rounded"
                 size="sm"
                 :status="chat.status"
-                :disabled="uploading || modelSetupRequired"
+                :disabled="uploading || modelUnavailable"
                 @stop="chat.stop()"
                 @reload="chat.regenerate()"
               />

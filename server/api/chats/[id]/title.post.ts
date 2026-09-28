@@ -1,28 +1,20 @@
 import { defineEventHandler, getValidatedRouterParams, readValidatedBody, createError } from 'h3';
 import type { UIMessage } from 'ai';
-import type { ProviderConfig } from '@github/copilot-sdk';
 import { and, asc, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { db, schema } from '../../../utils/db';
 import { getUserSession } from '../../../utils/auth';
 import { generateChatTitle } from '../../../utils/copilot';
+import { providerSchema } from '../../../utils/providerSchema';
 import { createDefaultChatTitle, getFirstUserText } from '../../../utils/chatTitle';
-
-const providerSchema = z.object({
-  type: z.enum(['openai', 'anthropic']).optional(),
-  baseUrl: z.string().url(),
-  apiKey: z.string().optional(),
-  bearerToken: z.string().optional(),
-  wireApi: z.enum(['completions', 'responses']).optional(),
-  headers: z.record(z.string(), z.string()).optional(),
-}).optional();
 
 export default defineEventHandler(async (event) => {
   const session = await getUserSession(event);
   const { id } = await getValidatedRouterParams(event, z.object({ id: z.string() }).parse);
-  const { model, provider } = await readValidatedBody(event, z.object({
+  const { model, provider, offline } = await readValidatedBody(event, z.object({
     model: z.string().min(1),
     provider: providerSchema,
+    offline: z.boolean().optional(),
   }).parse);
 
   const userId = session.user?.id || session.id;
@@ -50,7 +42,8 @@ export default defineEventHandler(async (event) => {
   const generatedTitle = await generateChatTitle({
     chatId: id,
     model,
-    provider: provider as ProviderConfig | undefined,
+    provider,
+    offline,
     prompt: firstText,
     signal: abortController.signal,
   });

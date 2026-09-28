@@ -32,7 +32,8 @@ import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
 import { z } from 'zod';
 import { cleanGeneratedChatTitle } from './chatTitle';
-import type { ModelMetadata, ReasoningEffort, ReasoningEffortValue } from '../../shared/utils/models';
+import type { ModelMetadata, ReasoningEffort, ReasoningEffortValue, ProviderConfigClient } from '../../shared/utils/models';
+import { OLLAMA_BASE_URL, OLLAMA_DEFAULT_WIRE_API } from '../../shared/utils/models';
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -75,7 +76,63 @@ export function getCopilotConfig(): CopilotRuntimeConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Singleton CopilotClient
+// Provider mapping: the UI's provider kinds → the Copilot SDK's provider types
+// ---------------------------------------------------------------------------
+
+/**
+ * True when the request should be served by a local Ollama server.
+ *
+ * Ollama is a UI-level kind: the SDK only understands `openai | azure |
+ * anthropic`, so Ollama is translated to a generic OpenAI-compatible provider
+ * before it ever reaches the SDK.
+ */
+export function isOllamaProvider(provider?: ProviderConfigClient): boolean {
+  return provider?.type === 'ollama';
+}
+
+/**
+ * Convert the client's provider settings into an SDK `ProviderConfig`.
+ *
+ * - `ollama` → `{ type: 'openai' }` with the Responses wire API. The Responses
+ *   API is required, not cosmetic: Ollama only emits its structured `reasoning`
+ *   output items (which become UI reasoning deltas) on that wire, and tool
+ *   calling is markedly less reliable on Chat Completions.
+ * - Ollama needs no API key; the SDK documents `apiKey` as optional for local
+ *   providers, so it is omitted rather than sent as an empty string.
+ */
+export function toSdkProvider(provider: ProviderConfigClient): ProviderConfig {
+  if (isOllamaProvider(provider)) {
+    return {
+      type: 'openai',
+      baseUrl: provider.baseUrl || OLLAMA_BASE_URL,
+      wireApi: provider.wireApi ?? OLLAMA_DEFAULT_WIRE_API,
+      ...(provider.apiKey ? { apiKey: provider.apiKey } : {}),
+      ...(provider.headers ? { headers: provider.headers } : {}),
+    };
+  }
+
+  return { ...provider, type: provider.type ?? 'openai' } as ProviderConfig;
+}
+
+/** Stable identity for a provider, used to key pooled Copilot clients. */
+function providerPoolKey(provider: ProviderConfigClient | undefined, offline: boolean): string {
+  if (!isOllamaProvider(provider)) return 'default';
+  return `ollama:${JSON.stringify({
+    baseUrl: provider?.baseUrl || OLLAMA_BASE_URL,
+    wireApi: provider?.wireApi ?? OLLAMA_DEFAULT_WIRE_API,
+    offline,
+  })}`;
+}
+
+// ---------------------------------------------------------------------------
+// CopilotClient pool
+//
+// The default client serves GitHub-hosted models and remote BYOK providers.
+// Offline / Ollama requests need their own client because `COPILOT_OFFLINE` and
+// `COPILOT_PROVIDER_*` are *process-level* environment variables: they must be
+// present when the CLI is spawned, and the CLI refuses to start in offline mode
+// unless `COPILOT_PROVIDER_BASE_URL` is set in that environment. The SDK still
+// requires the provider to be passed per session, so both must be supplied.
 // ---------------------------------------------------------------------------
 
 let _client: CopilotClient | null = null;
@@ -106,12 +163,85 @@ export async function getCopilotClient(): Promise<CopilotClient> {
   return _starting;
 }
 
+interface PooledClient {
+  client: CopilotClient | null;
+  starting: Promise<CopilotClient> | null;
+}
+
+const _pool = new Map<string, PooledClient>();
+
+/** Environment overrides for a CLI spawned against a local Ollama server. */
+function ollamaClientEnv(baseUrl: string, offline: boolean, model: string): NodeJS.ProcessEnv {
+  return {
+    ...(_config.env ?? process.env),
+    ...(offline ? { COPILOT_OFFLINE: 'true' } : {}),
+    COPILOT_PROVIDER_TYPE: 'openai',
+    COPILOT_PROVIDER_BASE_URL: baseUrl,
+    COPILOT_PROVIDER_WIRE_API: OLLAMA_DEFAULT_WIRE_API,
+    // BYOK providers require an explicit model *at CLI startup*, before any
+    // session exists ("BYOK providers require an explicit model"). Each session
+    // still carries its own `model`, so this only fixes the startup default.
+    COPILOT_MODEL: model,
+  };
+}
+
+/**
+ * Resolve the client that should serve this request.
+ *
+ * `offline` comes from the user's settings rather than the provider object,
+ * because it is a session-wide toggle rather than a provider property.
+ */
+export async function getCopilotClientFor(
+  provider?: ProviderConfigClient,
+  offline = false,
+  model = '',
+): Promise<CopilotClient> {
+  if (!isOllamaProvider(provider)) return await getCopilotClient();
+
+  const baseUrl = provider?.baseUrl || OLLAMA_BASE_URL;
+  const key = providerPoolKey(provider, offline);
+  let entry = _pool.get(key);
+  if (!entry) {
+    entry = { client: null, starting: null };
+    _pool.set(key, entry);
+  }
+  if (entry.client) return entry.client;
+  if (entry.starting) return entry.starting;
+
+  const slot = entry;
+  slot.starting = (async () => {
+    const cfg = _config;
+    const client = new CopilotClient({
+      useLoggedInUser: false,
+      ...(cfg.cliPath ? { cliPath: cfg.cliPath } : {}),
+      env: ollamaClientEnv(baseUrl, offline, model),
+    });
+    try {
+      await client.start();
+      slot.client = client;
+      return client;
+    } catch (err) {
+      slot.starting = null;
+      try { await client.stop(); } catch { /* ignore */ }
+      throw err;
+    }
+  })();
+
+  return slot.starting;
+}
+
 export async function stopCopilotClient(): Promise<void> {
   if (_client) {
     try { await _client.stop(); } catch { /* ignore */ }
     _client = null;
     _starting = null;
   }
+  for (const entry of _pool.values()) {
+    if (entry.client) {
+      try { await entry.client.stop(); } catch { /* ignore */ }
+    }
+  }
+  _pool.clear();
 }
 
 // Best-effort cleanup
@@ -285,7 +415,10 @@ function buildBuiltInTools() {
 interface RunArgs {
   chatId: string;
   model: string;
-  provider?: ProviderConfig;
+  /** Client-facing provider settings (may be the UI-level `ollama` kind). */
+  provider?: ProviderConfigClient;
+  /** Run the CLI with `COPILOT_OFFLINE=true` (local providers only). */
+  offline?: boolean;
   reasoningEffort?: ReasoningEffortValue;
   /** Latest user prompt text. */
   prompt: string;
@@ -340,6 +473,12 @@ Bad title: I'm powered by GPT-4.1
 Bad title: what model are you?`;
 
 const TITLE_GENERATION_TIMEOUT_MS = 20_000;
+/**
+ * Local models must cold-prefill the title prompt (a fresh session can never
+ * reuse a cached prefix), which on consumer hardware takes tens of seconds even
+ * for a small prompt. Give them a budget that can actually succeed.
+ */
+const TITLE_GENERATION_TIMEOUT_LOCAL_MS = 120_000;
 
 type SdkReasoningEffort = NonNullable<SessionConfig['reasoningEffort']>;
 
@@ -352,15 +491,17 @@ function reasoningEffortConfig(reasoningEffort?: ReasoningEffortValue): { reason
 async function getOrCreateSession(args: {
   chatId: string;
   model: string;
-  provider?: ProviderConfig;
+  provider?: ProviderConfigClient;
+  offline?: boolean;
   reasoningEffort?: ReasoningEffortValue;
   systemMessage: string;
   forceNew?: boolean;
   skillDirectories?: string[];
   disabledSkills?: string[];
 }) {
-  const client = await getCopilotClient();
+  const client = await getCopilotClientFor(args.provider, args.offline, args.model);
   const cfg = _config;
+  const provider = args.provider ? toSdkProvider(args.provider) : undefined;
 
   const skillsCfg = {
     ...(args.skillDirectories?.length ? { skillDirectories: args.skillDirectories } : {}),
@@ -376,7 +517,7 @@ async function getOrCreateSession(args: {
     tools: buildBuiltInTools(),
     systemMessage: { content: args.systemMessage },
     ...reasoningEffortConfig(args.reasoningEffort),
-    ...(args.provider ? { provider: args.provider } : {}),
+    ...(provider ? { provider } : {}),
     ...skillsCfg,
   };
 
@@ -391,7 +532,7 @@ async function getOrCreateSession(args: {
         workingDirectory: cfg.workingDirectory,
         tools: buildBuiltInTools(),
         ...reasoningEffortConfig(args.reasoningEffort),
-        ...(args.provider ? { provider: args.provider } : {}),
+        ...(provider ? { provider } : {}),
         ...skillsCfg,
       });
     } catch {
@@ -582,11 +723,12 @@ function translateEvent(event: SessionEvent, state: AdapterState): UIMessageChun
  *  a config change and recreate the underlying Copilot session. */
 const _lastConfigByChat = new Map<string, string>();
 
-function configFingerprint(model: string, provider?: ProviderConfig, reasoningEffort?: ReasoningEffortValue, disabledSkills?: string[], skillsSystemFragment?: string): string {
+function configFingerprint(model: string, provider?: ProviderConfigClient, offline?: boolean, reasoningEffort?: ReasoningEffortValue, disabledSkills?: string[], skillsSystemFragment?: string): string {
   const skills = disabledSkills?.length ? [...disabledSkills].sort() : null;
   return JSON.stringify({
     model,
     provider: provider ?? null,
+    offline: offline ?? false,
     reasoningEffort: reasoningEffort ?? null,
     skills,
     fragment: skillsSystemFragment || null,
@@ -597,7 +739,7 @@ export async function runChatTurn(args: RunArgs): Promise<Response> {
   const assistantMessageId = crypto.randomUUID();
   const state = newState(assistantMessageId);
 
-  const fingerprint = configFingerprint(args.model, args.provider, args.reasoningEffort, args.disabledSkills, args.skillsSystemFragment);
+  const fingerprint = configFingerprint(args.model, args.provider, args.offline, args.reasoningEffort, args.disabledSkills, args.skillsSystemFragment);
   const previous = _lastConfigByChat.get(args.chatId);
   const configChanged = previous !== undefined && previous !== fingerprint;
   _lastConfigByChat.set(args.chatId, fingerprint);
@@ -611,6 +753,7 @@ export async function runChatTurn(args: RunArgs): Promise<Response> {
     chatId: args.chatId,
     model: args.model,
     provider: args.provider,
+    offline: args.offline,
     reasoningEffort: args.reasoningEffort,
     systemMessage,
     forceNew: args.forceNew || configChanged,
@@ -716,7 +859,8 @@ export async function runChatTurn(args: RunArgs): Promise<Response> {
 export async function generateChatTitle(args: {
   chatId: string;
   model: string;
-  provider?: ProviderConfig;
+  provider?: ProviderConfigClient;
+  offline?: boolean;
   prompt: string;
   signal?: AbortSignal;
 }): Promise<string | null> {
@@ -730,7 +874,8 @@ export async function generateChatTitle(args: {
 
 async function generateChatTitleWithAiSdk(args: {
   model: string;
-  provider: ProviderConfig;
+  provider: ProviderConfigClient;
+  offline?: boolean;
   prompt: string;
   signal?: AbortSignal;
 }): Promise<string | null> {
@@ -739,14 +884,35 @@ async function generateChatTitleWithAiSdk(args: {
   const model = resolveTitleLanguageModel(args.model, args.provider);
   if (!model) return null;
 
+  const isLocal = isOllamaProvider(args.provider);
+
   try {
     const result = await generateText({
       model,
-      system: TITLE_SYSTEM_MESSAGE,
+      // A title needs no conversation, no tools and no agent harness. Sending
+      // the system prompt as `instructions` (rather than as a system message
+      // the provider counts as conversation) keeps the request tiny: the same
+      // title through the Copilot CLI costs ~14.5k prompt tokens, because the
+      // CLI's own system prompt and tool schemas dominate that path.
+      providerOptions: {
+        ...titleProviderOptions(args.provider),
+        ...(args.provider.type === 'anthropic'
+          ? {}
+          : {
+              openai: {
+                instructions: TITLE_SYSTEM_MESSAGE,
+                // A title must not spend the local model's slowest resource on a
+                // reasoning pass; Ollama honours `effort: "none"` (non-Ollama
+                // OpenAI-compatible endpoints simply ignore the field).
+                ...(isOllamaProvider(args.provider) ? { reasoning: { effort: 'none' } } : {}),
+              },
+            }),
+      },
       prompt: args.prompt,
-      providerOptions: titleProviderOptions(args.provider),
       abortSignal: args.signal,
-      timeout: TITLE_GENERATION_TIMEOUT_MS,
+      // A local model still has to prefill even this small prompt from cold, so
+      // it needs far more than the remote budget.
+      timeout: isLocal ? TITLE_GENERATION_TIMEOUT_LOCAL_MS : TITLE_GENERATION_TIMEOUT_MS,
     });
 
     return cleanGeneratedChatTitle(result.text);
@@ -758,12 +924,14 @@ async function generateChatTitleWithAiSdk(args: {
 async function generateChatTitleWithCopilot(args: {
   chatId: string;
   model: string;
-  provider?: ProviderConfig;
+  provider?: ProviderConfigClient;
+  offline?: boolean;
   prompt: string;
   signal?: AbortSignal;
 }): Promise<string | null> {
-  const client = await getCopilotClient();
+  const client = await getCopilotClientFor(args.provider, args.offline, args.model);
   const sessionId = `title-${args.chatId}-${crypto.randomUUID()}`;
+  const provider = args.provider ? toSdkProvider(args.provider) : undefined;
   const session = await client.createSession({
     sessionId,
     model: args.model,
@@ -773,7 +941,7 @@ async function generateChatTitleWithCopilot(args: {
     tools: [],
     availableTools: [],
     systemMessage: { content: TITLE_SYSTEM_MESSAGE },
-    ...(args.provider ? { provider: args.provider } : {}),
+    ...(provider ? { provider } : {}),
   });
 
   const onAbort = () => { void session.abort(); };
@@ -793,8 +961,8 @@ async function generateChatTitleWithCopilot(args: {
   }
 }
 
-function resolveTitleLanguageModel(model: string, provider: ProviderConfig): LanguageModel | null {
-  if ((provider.type ?? 'openai') === 'anthropic') {
+function resolveTitleLanguageModel(model: string, provider: ProviderConfigClient): LanguageModel | null {
+  if (provider.type === 'anthropic') {
     const anthropic = createAnthropic({
       baseURL: provider.baseUrl,
       apiKey: provider.apiKey ?? (provider.bearerToken ? undefined : 'unused'),
@@ -805,15 +973,17 @@ function resolveTitleLanguageModel(model: string, provider: ProviderConfig): Lan
     return anthropic(model);
   }
 
-  if ((provider.type ?? 'openai') === 'openai') {
+  // Ollama speaks the OpenAI protocol; it is only a distinct *kind* in the UI.
+  if (provider.type === 'openai' || provider.type === 'ollama') {
     const headers = provider.bearerToken
       ? { ...provider.headers, Authorization: `Bearer ${provider.bearerToken}` }
       : provider.headers;
     const openai = createOpenAI({
       baseURL: provider.baseUrl,
-      apiKey: provider.apiKey ?? provider.bearerToken ?? 'unused',
+      // Ollama ignores the API key, but the OpenAI client requires a value.
+      apiKey: provider.apiKey || provider.bearerToken || 'unused',
       headers,
-      name: 'byok-openai',
+      name: provider.type === 'ollama' ? 'byok-ollama' : 'byok-openai',
     });
     return provider.wireApi === 'responses' ? openai.responses(model) : openai.chat(model);
   }
@@ -821,8 +991,8 @@ function resolveTitleLanguageModel(model: string, provider: ProviderConfig): Lan
   return null;
 }
 
-function titleProviderOptions(provider: ProviderConfig) {
-  if ((provider.type ?? 'openai') === 'anthropic') {
+function titleProviderOptions(provider: ProviderConfigClient) {
+  if (provider.type === 'anthropic') {
     return {
       anthropic: {
         thinking: { type: 'disabled' },
@@ -841,8 +1011,12 @@ function titleProviderOptions(provider: ProviderConfig) {
  *  edit/regenerate). Errors are swallowed since the session may not exist. */
 export async function dropCopilotSession(chatId: string): Promise<void> {
   _lastConfigByChat.delete(chatId);
-  if (!_client) return;
-  try { await _client.deleteSession(chatId); } catch { /* ignore */ }
+  // The session may live in any pooled client (default or a local provider's).
+  const clients = [_client, ...[..._pool.values()].map((entry) => entry.client)]
+    .filter((client): client is CopilotClient => !!client);
+  await Promise.all(clients.map(async (client) => {
+    try { await client.deleteSession(chatId); } catch { /* ignore */ }
+  }));
 }
 
 /** List models exposed by the Copilot CLI. Empty array on failure. */
@@ -851,13 +1025,38 @@ export async function listCopilotModels(): Promise<Array<{ id: string; name: str
   return result.models;
 }
 
-export interface CopilotModelsStatus {
+/** A model discovered from a local Ollama server. */
+export interface OllamaModelInfo {
+  name: string;
+  parameterSize?: string;
+  quantization?: string;
+  sizeBytes?: number;
+  /**
+   * Context window the model is *currently loaded with*, not the maximum the
+   * model file supports. Ollama's `/api/tags` reports the (often much larger)
+   * training-time maximum, so only a running model reports the effective value.
+   */
+  contextLength?: number;
+  capabilities: string[];
+}
+
+export interface ModelsStatus {
   models: ModelMetadata[];
   copilot: {
     available: boolean;
     message?: string;
   };
+  /** Local Ollama discovery, independent of Copilot auth. */
+  ollama: {
+    available: boolean;
+    version?: string;
+    models: OllamaModelInfo[];
+    message?: string;
+  };
 }
+
+/** Kept for existing imports. */
+export type CopilotModelsStatus = ModelsStatus;
 
 function mapModelInfo(model: ModelInfo): ModelMetadata {
   return {
@@ -871,23 +1070,117 @@ function mapModelInfo(model: ModelInfo): ModelMetadata {
   };
 }
 
-/** List models and report whether local Copilot auth/runtime is usable. */
-export async function getCopilotModelsStatus(): Promise<CopilotModelsStatus> {
+/** Strip the OpenAI-compatible `/v1` suffix to reach Ollama's native API. */
+function ollamaNativeBase(baseUrl: string): string {
+  return (baseUrl || OLLAMA_BASE_URL).replace(/\/+$/, '').replace(/\/v1$/i, '');
+}
+
+async function ollamaFetch(baseUrl: string, path: string, timeoutMs = 3000): Promise<unknown> {
+  const response = await fetch(`${ollamaNativeBase(baseUrl)}${path}`, {
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!response.ok) throw new Error(`Ollama ${path} returned ${response.status}`);
+  return await response.json();
+}
+
+/**
+ * Discover the models a local Ollama server has installed.
+ *
+ * `/api/tags` is the authoritative installed-model list (with size, parameter
+ * count, quantization and capabilities). `/api/ps` is layered on top purely to
+ * obtain the effective context length, which is only reported for models that
+ * are currently loaded.
+ */
+export async function discoverOllamaModels(baseUrl: string): Promise<{
+  version?: string;
+  models: OllamaModelInfo[];
+}> {
+  const tags = await ollamaFetch(baseUrl, '/api/tags') as { models?: unknown[] };
+
+  // Context length of currently loaded models, keyed by name.
+  const runningContext = new Map<string, number>();
   try {
-    const client = await getCopilotClient();
-    const models = await client.listModels();
-    return {
-      models: models.map(mapModelInfo),
-      copilot: { available: true },
+    const ps = await ollamaFetch(baseUrl, '/api/ps') as { models?: unknown[] };
+    for (const entry of ps.models ?? []) {
+      const row = entry as { name?: string; context_length?: number };
+      if (row.name && row.context_length) runningContext.set(row.name, row.context_length);
+    }
+  } catch {
+    // `/api/ps` unavailable — context length simply stays unknown.
+  }
+
+  let version: string | undefined;
+  try {
+    const info = await ollamaFetch(baseUrl, '/api/version') as { version?: string };
+    version = info.version;
+  } catch {
+    // Version is cosmetic.
+  }
+
+  const models = (tags.models ?? []).map((entry) => {
+    const row = entry as {
+      name?: string;
+      size?: number;
+      details?: { parameter_size?: string; quantization_level?: string };
+      capabilities?: string[];
     };
-  } catch (err) {
-    console.error('[copilot] listModels failed', err);
+    const name = row.name ?? '';
     return {
-      models: [],
-      copilot: {
-        available: false,
-        message: 'Sign in to GitHub Copilot in your terminal, or enable BYOK provider settings.',
-      },
-    };
+      name,
+      parameterSize: row.details?.parameter_size,
+      quantization: row.details?.quantization_level,
+      sizeBytes: row.size,
+      contextLength: runningContext.get(name),
+      capabilities: row.capabilities ?? [],
+    } satisfies OllamaModelInfo;
+  }).filter((model) => !!model.name);
+
+  return { version, models };
+}
+
+/** Report Copilot model availability plus local Ollama discovery. */
+export async function getCopilotModelsStatus(): Promise<ModelsStatus> {
+  const baseUrl = process.env.OLLAMA_BASE_URL || OLLAMA_BASE_URL;
+
+  const [copilotResult, ollamaResult] = await Promise.allSettled([
+    (async () => {
+      const client = await getCopilotClient();
+      return await client.listModels();
+    })(),
+    discoverOllamaModels(baseUrl),
+  ]);
+
+  const models = copilotResult.status === 'fulfilled' ? copilotResult.value.map(mapModelInfo) : [];
+  if (copilotResult.status === 'rejected') {
+    console.error('[copilot] listModels failed', copilotResult.reason);
+  }
+
+  // When the local server answers, Copilot auth is irrelevant for the user's
+  // likely intent, so the message points at the local server instead of login.
+  const ollamaAvailable = ollamaResult.status === 'fulfilled';
+  const fallbackCopilotMessage = ollamaAvailable
+    ? 'GitHub Copilot is not signed in. Local Ollama models are available in Provider Settings.'
+    : 'Sign in to GitHub Copilot in your terminal, or enable BYOK provider settings.';
+
+  return {
+    models,
+    copilot: copilotResult.status === 'fulfilled'
+      ? { available: true }
+      : { available: false, message: fallbackCopilotMessage },
+    ollama: ollamaAvailable
+      ? { available: true, version: ollamaResult.value.version, models: ollamaResult.value.models }
+      : {
+          available: false,
+          models: [],
+          message: `No Ollama server responded at ${ollamaBaseForMessage(baseUrl)}.`,
+        },
+  };
+}
+
+function ollamaBaseForMessage(baseUrl: string): string {
+  try {
+    return new URL(ollamaNativeBase(baseUrl)).host;
+  } catch {
+    return ollamaNativeBase(baseUrl);
   }
 }

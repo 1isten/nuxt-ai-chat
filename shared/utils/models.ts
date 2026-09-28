@@ -8,8 +8,44 @@ export const FALLBACK_MODELS = [
 // Kept for backward compatibility with imports elsewhere.
 export const MODELS = FALLBACK_MODELS;
 
+/**
+ * Provider kinds the UI offers. `ollama` is a first-class local option that is
+ * translated to the SDK's generic `openai` provider type at the server
+ * boundary (see `toSdkProvider` in `server/utils/copilot.ts`).
+ */
+export type ProviderType = 'ollama' | 'openai' | 'anthropic';
+
+export const PROVIDER_TYPE_ITEMS: Array<{ label: string; value: ProviderType }> = [
+  { label: 'Ollama (Local)', value: 'ollama' },
+  { label: 'OpenAI / OpenAI-compatible', value: 'openai' },
+  { label: 'Anthropic / DeepSeek', value: 'anthropic' },
+];
+
+/** Local Ollama's OpenAI-compatible base URL. */
+export const OLLAMA_BASE_URL = 'http://localhost:11434/v1';
+
+/**
+ * Default base URL for each provider type. Ollama points at the local server;
+ * the remote providers intentionally default to empty so the user must supply
+ * an explicit endpoint.
+ */
+export const PROVIDER_DEFAULT_BASE_URLS: Record<ProviderType, string> = {
+  ollama: OLLAMA_BASE_URL,
+  anthropic: 'https://api.anthropic.com',
+  openai: 'https://api.openai.com/v1',
+};
+
+/**
+ * Ollama requires the Responses wire API: it is what makes the server emit
+ * structured `reasoning` output items (surfaced to the UI as reasoning deltas)
+ * and what keeps tool calling reliable. The Chat Completions wire both hides
+ * thinking and degrades tool calling badly enough that small models stop
+ * calling tools at all.
+ */
+export const OLLAMA_DEFAULT_WIRE_API = 'responses' as const;
+
 export interface ProviderConfigClient {
-  type?: 'openai' | 'anthropic';
+  type?: ProviderType;
   baseUrl: string;
   apiKey?: string;
   bearerToken?: string;
@@ -20,7 +56,18 @@ export interface ProviderConfigClient {
 export interface ProviderSettings {
   /** When true, requests use BYOK (provider + custom model). */
   byok: boolean;
+  /**
+   * When true, the Copilot CLI runs with `COPILOT_OFFLINE=true`: it will not
+   * contact GitHub and only accepts a local model provider.
+   */
+  offline?: boolean;
   provider?: ProviderConfigClient;
+  /**
+   * Last base URL used per provider kind. Keyed by kind so switching kinds
+   * never carries one provider's endpoint over to another — a hand-typed
+   * `https://api.deepseek.com/anthropic` must not survive a switch to Ollama.
+   */
+  baseUrlByType?: Partial<Record<ProviderType, string>>;
   /** Custom model id to send when byok is true. */
   customModel?: string;
   /** Whether the custom provider/model should receive a reasoning effort option. */
