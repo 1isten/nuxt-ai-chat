@@ -66,6 +66,45 @@ export default defineNuxtConfig({
     // prose: true,
     fonts: true,
   },
+
+  /**
+   * Fully offline icons.
+   *
+   * `provider: 'none'` stops the Iconify API from being contacted at runtime;
+   * every icon must then come from the client bundle, or it renders as nothing
+   * (the console warns `[Icon] failed to load icon ...` when the network is
+   * unreachable).
+   *
+   * Scanning is off by default, so it is enabled here and pointed at the places
+   * that actually reference icons: our own app code, shared utilities, and
+   * `@nuxt/ui`'s own components — that last one matters most, because its 44
+   * built-in lucide icons live in a `node_modules` path that the scanner skips
+   * by default. `refs/` and `test/` are excluded purely to keep the scan fast.
+   *
+   * Note: scanning is static, so it only sees literal icon names. Icons picked
+   * by a runtime expression (e.g. `iconForModel()` in shared/utils/models.ts)
+   * are not detected and must be listed in `icons` below.
+   */
+  icon: {
+    provider: 'none',
+    clientBundle: {
+      scan: {
+        globInclude: [
+          '{app,shared}/**/*.{vue,ts}',
+          'node_modules/@nuxt/ui/dist/**',
+        ],
+        globExclude: [
+          'node_modules',
+          'test',
+          'refs',
+          'dist',
+          '.output',
+          '.nuxt',
+        ],
+      },
+    },
+  },
+
   runtimeConfig: {
     public: {
       // When the static SPA is served separately from the API, set
