@@ -32,7 +32,7 @@
     "@iconify-json/mdi": "^1.2.3",
     "@iconify-json/simple-icons": "^1.2.81",
     "@libsql/client": "^0.17.3",
-    "@nuxt/ui": "^4.7.1",
+    "@nuxt/ui": "^4.11.2",
     "@nuxthub/core": "^0.10.7",
     "@shikijs/langs": "^4.0.2",
     "@vercel/blob": "^2.3.3",
@@ -50,7 +50,7 @@
     "nuxt-csurf": "^1.6.5",
     "shiki": "^4.0.2",
     "striptags": "3.2.0",
-    "tailwindcss": "^4.3.0",
+    "tailwindcss": "^4.3.3",
     "zod": "^4.4.3"
   },
   "devDependencies": {
