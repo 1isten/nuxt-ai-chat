@@ -34,10 +34,15 @@ export interface DbHandle {
 //     `import.meta.url` strategy points at the wrong directory.
 function defaultMigrationsDir(): string {
   if (process.env.MIGRATIONS_DIR) return path.resolve(process.env.MIGRATIONS_DIR);
-  const fromUrl = path.resolve(
-    fileURLToPath(new URL('../db/migrations/sqlite', import.meta.url)),
-  );
-  if (fs.existsSync(path.join(fromUrl, 'meta', '_journal.json'))) return fromUrl;
+  try {
+    const fromUrl = path.resolve(
+      fileURLToPath(new URL('../db/migrations/sqlite', import.meta.url)),
+    );
+    if (fs.existsSync(path.join(fromUrl, 'meta', '_journal.json'))) return fromUrl;
+  } catch {
+    // import.meta.url isn't a resolvable file:// URL in some Nitro bundles
+    // (e.g. `nuxt generate` prerender chunks) — fall through to the cwd strategy.
+  }
   return path.resolve(process.cwd(), 'server/db/migrations/sqlite');
 }
 

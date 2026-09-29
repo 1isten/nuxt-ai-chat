@@ -63,8 +63,8 @@ export default defineNuxtConfig({
         'error',
       ],
     },
-    // prose: true,
     fonts: true,
+    prose: false,
   },
 
   /**
