@@ -2,6 +2,7 @@
 import { Chat } from '@ai-sdk/vue';
 import { DefaultChatTransport } from 'ai';
 import type { UIMessage } from 'ai';
+import { DEFAULT_CHAT_TITLE } from '#shared/utils/chatTitle';
 
 const route = useRoute();
 const toast = useToast();
@@ -72,7 +73,7 @@ const chat = new Chat({
       await refreshNuxtData('chats');
       const chatsCache = useNuxtData<{ id: string; label: string }[]>('chats');
       const updated = chatsCache.data.value?.find((c) => c.id === data.value!.id);
-      if (updated && updated.label !== 'Untitled chat') {
+      if (updated && updated.label !== DEFAULT_CHAT_TITLE) {
         title.value = updated.label;
       }
     }
@@ -140,10 +141,16 @@ async function generateTitleOnce() {
     || !data.value?.id
     || !title.value
     || modelSetupRequired.value
+    // Without this the request goes out with an empty `model` (BYOK selected
+    // but nothing configured yet) and the server rejects it with a 400. The
+    // watcher below re-runs this once a model becomes usable.
+    || modelUnavailable.value
   ) {
     return;
   }
 
+  // Set only once the request is really being made: setting it while bailing
+  // out above would permanently suppress title generation for this page.
   titleGenerationAttempted.value = true;
 
   try {
@@ -276,8 +283,11 @@ onMounted(() => {
 // Trigger one-shot LLM title generation whenever the chat has a (fallback)
 // title and a model is ready. Covers both existing chats (title set on mount)
 // and brand-new chats (title arrives via onData after the first turn).
+// `modelUnavailable` is watched too: a chat opened before a model is chosen
+// (or before Ollama's model list has loaded) must still get its title once one
+// becomes usable.
 watch(
-  [title, modelSetupRequired],
+  [title, modelSetupRequired, modelUnavailable],
   () => { void generateTitleOnce(); },
   { immediate: true },
 );

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { DropdownMenuItem } from '@nuxt/ui';
+import { DEFAULT_CHAT_TITLE } from '#shared/utils/chatTitle';
 
 const appTitle = useState('app-title');
 const appDescription = useState('app-description');
@@ -14,7 +15,7 @@ const { data: chats, refresh: refreshChats } = await useFetch('/api/chats', {
   key: 'chats',
   transform: (data) => data.map((chat) => ({
     id: chat.id,
-    label: chat.title || 'Untitled chat',
+    label: chat.title || DEFAULT_CHAT_TITLE,
     to: `/chat/${chat.id}`,
     icon: 'i-lucide-message-circle',
     createdAt: chat.createdAt,
@@ -45,7 +46,9 @@ const items = computed(() => groups.value?.flatMap((group) => {
     ...item,
     slot: 'chat' as const,
     icon: undefined,
-    class: item.label === 'Untitled chat' ? 'text-muted' : '',
+    // `label` is already the display fallback (see the transform above), so an
+    // untitled chat is one whose label equals that shared fallback.
+    class: item.label === DEFAULT_CHAT_TITLE ? 'text-muted' : '',
   }))];
 }));
 
@@ -54,7 +57,9 @@ function getChatActions(item: { id: string; label: string }): DropdownMenuItem[]
     {
       label: 'Rename',
       icon: 'i-lucide-pencil',
-      onSelect: () => renameChat(item.id, item.label === 'Untitled chat' ? '' : item.label),
+      // Seed the rename dialog with an empty string for an untitled chat, so
+      // the user does not have to delete the placeholder text first.
+      onSelect: () => renameChat(item.id, item.label === DEFAULT_CHAT_TITLE ? '' : item.label),
     },
   ], [
     {

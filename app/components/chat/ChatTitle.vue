@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { DropdownMenuItem } from '@nuxt/ui';
+import { DEFAULT_CHAT_TITLE } from '#shared/utils/chatTitle';
 
 const props = defineProps<{
   chatId: string;
@@ -13,7 +14,7 @@ const emit = defineEmits<{
 
 const { renameChat, deleteChat } = useChatActions();
 
-const displayTitle = computed(() => props.title || 'Untitled chat');
+const displayTitle = computed(() => props.title || DEFAULT_CHAT_TITLE);
 
 async function rename() {
   const newTitle = await renameChat(props.chatId, props.title);

@@ -14,11 +14,41 @@ export const SKILLS_DIR = process.env.SKILLS_DIR
 
 interface CachedSkills {
   list: SkillFull[];
-  /** Last mtime of SKILLS_DIR — invalidates the cache when a skill is added/removed. */
-  mtimeMs: number;
+  /**
+   * Fingerprint of everything the cached list was built from: the `SKILLS_DIR`
+   * mtime (skill folders added/removed) plus each `SKILL.md`'s mtime and size.
+   */
+  signature: string;
 }
 
 let _cache: CachedSkills | null = null;
+
+/**
+ * Cheap fingerprint of the skills on disk.
+ *
+ * Watching only `SKILLS_DIR`'s own mtime is not enough: editing an existing
+ * `SKILL.md` changes the *file's* mtime, not the parent directory's, so a
+ * cached body would keep being injected into the system message until the
+ * server was restarted. Since that body is inlined verbatim by
+ * `renderSkillsSystemMessage`, a stale cache silently feeds the model the old
+ * instructions — the worst possible failure mode for a style/workflow skill.
+ *
+ * Collecting these stats costs one `stat` per skill, which is negligible
+ * against the cost of the request that follows.
+ */
+async function skillsSignature(dirNames: string[]): Promise<string> {
+  const parts = await Promise.all(
+    dirNames.map(async (name) => {
+      try {
+        const stat = await fs.stat(path.join(SKILLS_DIR, name, 'SKILL.md'));
+        return `${name}:${stat.mtimeMs}:${stat.size}`;
+      } catch {
+        return `${name}:missing`;
+      }
+    }),
+  );
+  return parts.sort().join('|');
+}
 
 /**
  * Minimal YAML frontmatter parser. Only extracts top-level `key: value` pairs
@@ -60,32 +90,32 @@ async function readSkill(dirPath: string, dirName: string): Promise<SkillFull | 
 
 /**
  * Discover all skills in the repo's `.github/skills/` directory.
- * Result is cached across requests until the parent directory's mtime changes
- * (covers add/remove of skill folders; not edits within an existing SKILL.md,
- * which doesn't matter for the listing endpoint anyway).
+ * Result is cached until a skill folder is added/removed *or* any existing
+ * `SKILL.md` changes — see `skillsSignature`.
  */
 export async function discoverSkills(): Promise<SkillFull[]> {
-  let stat;
+  let entries;
   try {
-    stat = await fs.stat(SKILLS_DIR);
+    entries = await fs.readdir(SKILLS_DIR, { withFileTypes: true });
   } catch {
     return [];
   }
 
-  if (_cache && _cache.mtimeMs === stat.mtimeMs) {
+  const dirNames = entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
+  const signature = await skillsSignature(dirNames);
+
+  if (_cache && _cache.signature === signature) {
     return _cache.list;
   }
 
-  const entries = await fs.readdir(SKILLS_DIR, { withFileTypes: true });
   const skills: SkillFull[] = [];
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    const skill = await readSkill(path.join(SKILLS_DIR, entry.name), entry.name);
+  for (const dirName of dirNames) {
+    const skill = await readSkill(path.join(SKILLS_DIR, dirName), dirName);
     if (skill) skills.push(skill);
   }
   skills.sort((a, b) => a.name.localeCompare(b.name));
 
-  _cache = { list: skills, mtimeMs: stat.mtimeMs };
+  _cache = { list: skills, signature };
   return skills;
 }
 

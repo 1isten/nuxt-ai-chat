@@ -820,6 +820,12 @@ async function getOrCreateSession(args: {
   if (args.forceNew) {
     try { await client.deleteSession(args.chatId); } catch { /* ignore */ }
   } else {
+    // Resuming is the normal path: the session outlives the request, so a new
+    // turn continues the same conversation (and reuses its cached prefix).
+    // Only "this session does not exist" may fall through to createSession —
+    // and that happens with the SAME id, so swallowing an unrelated failure
+    // here would hide the real cause and then surface a confusing
+    // "session already exists"-style error instead.
     try {
       return await client.resumeSession(args.chatId, {
         model: args.model,
@@ -831,12 +837,25 @@ async function getOrCreateSession(args: {
         ...(provider ? { provider } : {}),
         ...skillsCfg,
       });
-    } catch {
-      // session doesn't exist yet — fall through to create
+    } catch (err) {
+      if (!isSessionNotFound(err)) throw err;
     }
   }
 
   return await client.createSession(baseConfig);
+}
+
+/**
+ * True when a `resumeSession` failure means "there is no such session".
+ *
+ * The SDK surfaces the CLI's `session.resume` rejection as a plain `Error`, so
+ * the message is the only signal available. Observed wordings are
+ * `Session not found: <id>` and `Session not found or not currently active: <id>`
+ * (the latter when the session is still being torn down); both are matched.
+ */
+function isSessionNotFound(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /session not found|not currently active/i.test(message);
 }
 
 // ---------------------------------------------------------------------------
@@ -874,6 +893,16 @@ function newState(assistantMessageId: string): AdapterState {
     finalParts: [],
     assistantMessageId,
   };
+}
+
+/**
+ * Render a tool failure the user can act on, keeping the SDK's machine-readable
+ * `code` (when present) alongside its message. On `tool.execution_complete` the
+ * code carries the class of failure — schema rejection, permission denial,
+ * spawn failure — which the bare message frequently does not spell out.
+ */
+function formatToolFailure(message: string, code?: string): string {
+  return code ? `${message} [${code}]` : message;
 }
 
 function translateEvent(event: SessionEvent, state: AdapterState): UIMessageChunk[] {
@@ -985,8 +1014,16 @@ function translateEvent(event: SessionEvent, state: AdapterState): UIMessageChun
           output: parsed,
         } as unknown as UIMessage['parts'][number]);
       } else {
-        const errorText = error?.message
-          ?? 'Tool call rejected before execution: the arguments did not match the tool schema. Call the tool again, passing each parameter as the documented JSON type — `data` must be an actual JSON array of objects, not a JSON-encoded string.';
+        // `ToolExecutionCompleteError.message` is a *required* field, so when
+        // the SDK supplies an `error` object its real text is always available.
+        // The previous `error?.message ?? '<advice about arguments>'` therefore
+        // effectively always took the first branch, and the "advice" fallback
+        // only ever fired for a *bare* failure (`success: false` with no
+        // `error`) — where blaming the arguments is usually simply wrong, and
+        // where it also hid the fact that the SDK had told us nothing.
+        const errorText = error
+          ? formatToolFailure(error.message, error.code)
+          : 'The tool failed without reporting a reason. Check the server logs, then call the tool again.';
         out.push({
           type: 'tool-output-error',
           toolCallId,
@@ -1182,18 +1219,36 @@ async function generateChatTitleWithAiSdk(args: {
   if (!model) return null;
 
   const isLocal = isOllamaProvider(args.provider);
+  const isAnthropic = args.provider.type === 'anthropic';
 
   try {
     const result = await generateText({
       model,
-      // A title needs no conversation, no tools and no agent harness. Sending
-      // the system prompt as `instructions` (rather than as a system message
-      // the provider counts as conversation) keeps the request tiny: the same
+      // A title needs no conversation, no tools and no agent harness: the same
       // title through the Copilot CLI costs ~14.5k prompt tokens, because the
       // CLI's own system prompt and tool schemas dominate that path.
+      //
+      // How the instruction reaches the model is provider-specific, and getting
+      // this wrong fails *silently* (see the note below):
+      //
+      //  - Anthropic has no equivalent of the Responses API's top-level
+      //    `instructions`, so the prompt must travel as a real system message.
+      //    Previously this branch passed no instruction at all, so the model
+      //    answered the user's message instead of titling it, the reply blew
+      //    past the title length/word limits and `cleanGeneratedChatTitle`
+      //    rejected it — leaving every Anthropic/BYOK chat untitled with no
+      //    error anywhere.
+      //  - The OpenAI/Responses wire (which also carries Ollama) keeps using
+      //    the API's dedicated `instructions` field. The AI SDK's own `system`
+      //    prompt does NOT populate that field — verified in
+      //    `@ai-sdk/openai` (`instructions: openaiOptions?.instructions`), and
+      //    a system message would instead be sent inside `input` as a
+      //    system/developer item, i.e. as conversation rather than as
+      //    instructions.
+      ...(isAnthropic ? { system: TITLE_SYSTEM_MESSAGE } : {}),
       providerOptions: {
         ...titleProviderOptions(args.provider),
-        ...(args.provider.type === 'anthropic'
+        ...(isAnthropic
           ? {}
           : {
               openai: {
@@ -1201,7 +1256,7 @@ async function generateChatTitleWithAiSdk(args: {
                 // A title must not spend the local model's slowest resource on a
                 // reasoning pass; Ollama honours `effort: "none"` (non-Ollama
                 // OpenAI-compatible endpoints simply ignore the field).
-                ...(isOllamaProvider(args.provider) ? { reasoning: { effort: 'none' } } : {}),
+                ...(isLocal ? { reasoning: { effort: 'none' } } : {}),
               },
             }),
       },

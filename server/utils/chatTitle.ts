@@ -1,6 +1,9 @@
 import type { UIMessage } from 'ai';
-
-export const DEFAULT_CHAT_TITLE = 'Untitled chat';
+// The fallback title lives in `shared/` so the client can compare against the
+// exact same value. Deliberately NOT re-exported from here: Nuxt auto-imports
+// both `shared/utils/*` and `server/utils/*`, so a re-export makes
+// `DEFAULT_CHAT_TITLE` ambiguous ("Duplicated imports ... has been ignored").
+import { DEFAULT_CHAT_TITLE } from '../../shared/utils/chatTitle';
 
 const CHAT_TITLE_TARGET_LENGTH = 30;
 const CHAT_TITLE_MAX_WORD_LENGTH = 50;
