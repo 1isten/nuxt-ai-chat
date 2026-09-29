@@ -4,7 +4,7 @@ const loading = ref(false);
 const chatId = crypto.randomUUID();
 
 const { user } = useUserSession();
-const { isOllama, ollamaStatus, modelUnavailable, modelUnavailableMessage } = useModels();
+const { isOllama, ollamaStatus, ollamaProbing, modelUnavailable, modelUnavailableMessage, refreshModels } = useModels();
 
 const greeting = computed(() => {
   const hour = new Date().getHours();
@@ -123,7 +123,21 @@ const quickChats: Array<{ label: string; icon: string }> = [
             icon="i-lucide-circle-alert"
             :title="isOllama ? (ollamaStatus.available ? 'No local model available' : 'Ollama server not reachable') : 'GitHub Copilot is not available locally'"
             :description="modelUnavailableMessage"
-          />
+          >
+            <!-- The status also recovers on its own; this is for the user who
+                 has just fixed something and does not want to wait for it. -->
+            <template #actions>
+              <UButton
+                icon="i-lucide-refresh-cw"
+                size="xs"
+                color="warning"
+                variant="soft"
+                label="Retry"
+                :loading="ollamaProbing"
+                @click="refreshModels()"
+              />
+            </template>
+          </UAlert>
 
           <UChatPrompt
             v-model="input"

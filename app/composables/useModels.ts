@@ -81,6 +81,26 @@ export function createDefaultProviderSettings(): ProviderSettings {
 }
 
 /**
+ * `useModels()` is instantiated once per component (picker, home, chat page),
+ * and every instance watches the endpoint. Without this, one settings change
+ * would fire one identical `/api/models` probe per caller — each of which may
+ * spawn a Copilot CLI process. All instances share the same `useState` refs, so
+ * a single in-flight request is enough to update them all.
+ */
+const probeInFlight = new Map<string, Promise<ModelsResponse>>();
+
+function probeModels(query: Record<string, string>): Promise<ModelsResponse> {
+  const key = JSON.stringify(query);
+  const pending = probeInFlight.get(key);
+  if (pending) return pending;
+
+  const request = $fetch<ModelsResponse>('/api/models', { query });
+  probeInFlight.set(key, request);
+  void request.catch(() => {}).finally(() => { probeInFlight.delete(key); });
+  return request;
+}
+
+/**
  * Manages the currently selected model + (optional) BYOK provider settings.
  *
  * Persisted to localStorage (works in SPA + Electron without cookies).
@@ -104,6 +124,7 @@ export function useModels() {
   const dynamicModels = useState<ModelOption[]>('copilot-models', () => FALLBACK_MODELS);
   const copilotStatus = useState<CopilotStatus>('copilot-status', () => ({ state: 'checking' }));
   const ollamaStatus = useState<OllamaStatus>('ollama-status', () => ({ available: false, models: [] }));
+  const ollamaProbing = useState<boolean>('ollama-probing', () => false);
 
   /** True when requests are routed to a local Ollama server. */
   const isOllama = computed(() =>
@@ -113,16 +134,43 @@ export function useModels() {
   /** True when the CLI is configured to never contact GitHub. */
   const isOffline = computed(() => isOllama.value && provider.value.offline !== false);
 
-  async function refreshModels() {
+  /**
+   * The endpoint model discovery probes.
+   *
+   * `undefined` for non-Ollama kinds: probing e.g. an OpenAI endpoint for
+   * Ollama's `/api/tags` would only produce a misleading failure. Any address
+   * the user configures — including a LAN machine such as
+   * `http://192.168.0.102:11434/v1` — is probed as-is, which is what makes a
+   * remote Ollama usable at all.
+   */
+  const ollamaProbeBaseUrl = computed(() =>
+    provider.value.provider?.type === 'ollama'
+      ? (provider.value.provider?.baseUrl?.trim() || OLLAMA_BASE_URL)
+      : undefined,
+  );
+
+  /**
+   * Refresh the model catalogue.
+   *
+   * `baseUrlOverride` probes an address that is not saved yet, so the Provider
+   * Settings panel can test a LAN address before committing it.
+   */
+  async function refreshModels(baseUrlOverride?: string) {
     copilotStatus.value = { state: 'checking' };
+    ollamaProbing.value = true;
     try {
       // Tell the server when this client is local-only, so it does not ask the
       // (deliberately unauthenticated) Copilot CLI for the hosted catalogue.
       const wantsOffline = !!provider.value.byok
         && provider.value.provider?.type === 'ollama'
         && provider.value.offline !== false;
-      const res = await $fetch<ModelsResponse>('/api/models', {
-        query: wantsOffline ? { offline: 'true' } : undefined,
+
+      const override = typeof baseUrlOverride === 'string' ? baseUrlOverride.trim() : '';
+      const probeBaseUrl = override || ollamaProbeBaseUrl.value;
+
+      const res = await probeModels({
+        ...(wantsOffline ? { offline: 'true' } : {}),
+        ...(probeBaseUrl ? { ollamaBaseUrl: probeBaseUrl } : {}),
       });
 
       ollamaStatus.value = {
@@ -155,8 +203,20 @@ export function useModels() {
         state: 'unavailable',
         message: 'Unable to check local GitHub Copilot. Confirm the API server is running, or enable BYOK provider settings.',
       };
+    } finally {
+      ollamaProbing.value = false;
     }
   }
+
+  /**
+   * Re-probe whenever the configured endpoint changes.
+   *
+   * Saving a new base URL must not leave the model list describing the previous
+   * server: otherwise the picker keeps showing the old machine's models (or
+   * none at all) and the composer stays locked until the user happens to press
+   * refresh.
+   */
+  watch(ollamaProbeBaseUrl, () => { void refreshModels(); });
 
   /**
    * The model id actually sent with a request.
@@ -259,14 +319,19 @@ export function useModels() {
    * Persist the auto-selected local model so the settings panel and the request
    * body agree on what is in use, instead of only diverging until the user
    * happens to open the panel.
+   *
+   * A saved id is also replaced when the server does not list it — the common
+   * case after pointing the app at a different machine, where keeping the old
+   * id would send it verbatim and get back an opaque "model not found".
    */
   function adoptFirstOllamaModel() {
     if (!provider.value.byok) return;
     if (provider.value.provider?.type !== 'ollama') return;
-    if (provider.value.customModel?.trim()) return;
-    const first = ollamaStatus.value.models[0]?.name;
-    if (!first) return;
-    provider.value = { ...provider.value, customModel: first };
+    const models = ollamaStatus.value.models;
+    if (!models.length) return;
+    const current = provider.value.customModel?.trim();
+    if (current && models.some((m) => m.name === current)) return;
+    provider.value = { ...provider.value, customModel: models[0]!.name };
   }
 
   watch(ollamaStatus, adoptFirstOllamaModel, { deep: true, immediate: true });
@@ -308,6 +373,10 @@ export function useModels() {
     reasoningEffort,
     copilotStatus,
     ollamaStatus,
+    /** True while `/api/models` (including the Ollama probe) is in flight. */
+    ollamaProbing,
+    /** Endpoint model discovery probes; `undefined` for non-Ollama kinds. */
+    ollamaProbeBaseUrl,
     ollamaStatusLabel,
     isOllama,
     isOffline,

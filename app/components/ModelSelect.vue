@@ -18,6 +18,8 @@ const {
   copilotStatus,
   ollamaStatus,
   ollamaStatusLabel,
+  ollamaProbing,
+  ollamaProbeBaseUrl,
   isOllama,
   modelSetupRequired,
   modelSetupMessage,
@@ -70,6 +72,8 @@ function normalize(p: ProviderSettings): ProviderSettings {
 
 const open = ref(false);
 const draft = ref<ProviderSettings>(normalize(provider.value));
+/** Set while `save()` commits the draft, so closing does not undo its probe. */
+let saving = false;
 
 function applyDefaultBaseUrl(p: ProviderSettings) {
   if (!p.provider) return;
@@ -89,8 +93,29 @@ watch(open, (v) => {
   if (v) {
     draft.value = normalize(JSON.parse(JSON.stringify(provider.value)));
     applyDefaultBaseUrl(draft.value);
+    return;
+  }
+  if (saving) {
+    saving = false;
+    return;
+  }
+  // Closing without saving: the panel may have probed a drafted address, so put
+  // the shared status back to whatever the saved configuration actually says.
+  if (draft.value.provider?.baseUrl !== provider.value.provider?.baseUrl) {
+    void refreshModels();
   }
 });
+
+/**
+ * The address the panel reports status for: the draft while it is being edited,
+ * so a LAN address can be tried out before it is saved.
+ */
+const draftProbeBaseUrl = computed(() => draft.value.provider?.baseUrl?.trim() || OLLAMA_BASE_URL);
+
+/** Probe the drafted address without saving it first. */
+function testDraftEndpoint() {
+  void refreshModels(draftProbeBaseUrl.value);
+}
 
 // Each provider kind keeps its own base URL. Switching kinds saves the URL for
 // the kind being left and restores the one for the kind being entered, so a
@@ -126,6 +151,19 @@ watch(() => draft.value.provider?.type, (next, prev) => {
 
 /** True while the draft targets a local Ollama server. */
 const draftIsOllama = computed(() => draft.value.provider?.type === 'ollama');
+
+/**
+ * True when the address in the field is not the one the reported status was
+ * measured against — the user should re-check before trusting "not reachable".
+ */
+const draftEndpointUntested = computed(() =>
+  draftIsOllama.value && draftProbeBaseUrl.value !== (ollamaProbeBaseUrl.value ?? ''),
+);
+
+/** Status line for the panel: the probe result, or the address that was probed. */
+const ollamaAlertDescription = computed(() =>
+  ollamaStatus.value.message || `No Ollama server responded at ${draftProbeBaseUrl.value}`,
+);
 
 /**
  * Fall back to the first model the local server actually has, so the field
@@ -183,6 +221,7 @@ function save() {
       draft.value.customModel = models_[0]?.name ?? '';
     }
   }
+  saving = true;
   provider.value = draft.value;
   open.value = false;
 }
@@ -278,8 +317,8 @@ const canConfigureReasoning = computed(() =>
             color="warning"
             variant="soft"
             icon="i-lucide-circle-alert"
-            title="No local Ollama server responded"
-            :description="ollamaStatus.message || `Start Ollama and pull a model, then reopen this panel. Expected at ${OLLAMA_BASE_URL}`"
+            title="Ollama server not reachable"
+            :description="ollamaAlertDescription"
           />
 
           <UAlert
@@ -467,7 +506,11 @@ const canConfigureReasoning = computed(() =>
           <!-- Local server status sits opposite the actions so it is visible
                while deciding whether saving this configuration is safe. -->
           <div v-if="draftIsOllama" class="flex min-w-0 items-center gap-1.5 text-xs text-muted">
-            <template v-if="ollamaStatus.available">
+            <template v-if="ollamaProbing">
+              <UIcon name="i-lucide-loader-circle" class="size-3.5 shrink-0 animate-spin" />
+              <span class="truncate">Checking {{ draftProbeBaseUrl }}…</span>
+            </template>
+            <template v-else-if="ollamaStatus.available">
               <span class="size-1.5 shrink-0 rounded-full bg-success" />
               <span class="truncate">{{ ollamaStatusLabel }}</span>
             </template>
@@ -476,12 +519,13 @@ const canConfigureReasoning = computed(() =>
               <span class="truncate">{{ ollamaStatus.message || 'Ollama not reachable' }}</span>
             </template>
             <UButton
-              icon="i-lucide-refresh-cw"
+              :icon="draftEndpointUntested && !ollamaProbing ? 'i-lucide-plug-zap' : 'i-lucide-refresh-cw'"
               size="xs"
               color="neutral"
               variant="ghost"
-              title="Re-check the local Ollama server"
-              @click="refreshModels()"
+              :loading="ollamaProbing"
+              :title="draftEndpointUntested ? `Test the address in the Base URL field (${draftProbeBaseUrl})` : 'Re-check the Ollama server'"
+              @click="testDraftEndpoint()"
             />
           </div>
           <span v-else />

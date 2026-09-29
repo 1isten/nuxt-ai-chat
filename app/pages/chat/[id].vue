@@ -6,7 +6,7 @@ import { DEFAULT_CHAT_TITLE } from '#shared/utils/chatTitle';
 
 const route = useRoute();
 const toast = useToast();
-const { effectiveModel, effectiveProvider, effectiveReasoningEffort, isOffline, isOllama, ollamaStatus, modelSetupRequired, modelSetupMessage, modelUnavailable, modelUnavailableMessage } = useModels();
+const { effectiveModel, effectiveProvider, effectiveReasoningEffort, isOffline, isOllama, ollamaStatus, ollamaProbing, modelSetupRequired, modelSetupMessage, modelUnavailable, modelUnavailableMessage, refreshModels } = useModels();
 const { enabledSkills } = useSkills();
 const { csrf, headerName } = useCsrf();
 
@@ -565,7 +565,21 @@ watch(
             icon="i-lucide-circle-alert"
             :title="isOllama ? (ollamaStatus.available ? 'No local model available' : 'Ollama server not reachable') : 'GitHub Copilot is not available locally'"
             :description="modelUnavailableMessage"
-          />
+          >
+            <!-- The status also recovers on its own; this is for the user who
+                 has just fixed something and does not want to wait for it. -->
+            <template #actions>
+              <UButton
+                icon="i-lucide-refresh-cw"
+                size="xs"
+                color="warning"
+                variant="soft"
+                label="Retry"
+                :loading="ollamaProbing"
+                @click="refreshModels()"
+              />
+            </template>
+          </UAlert>
 
           <UChatPrompt
             v-if="isOwner"

@@ -1422,17 +1422,110 @@ function mapModelInfo(model: ModelInfo): ModelMetadata {
   };
 }
 
+/** How long a discovery probe may take before it is called a timeout. */
+const OLLAMA_PROBE_TIMEOUT_MS = 4000;
+
+/**
+ * Why a probe failed.
+ *
+ * The distinction matters for the user: "nothing is listening on that port" and
+ * "that host never answered" need different fixes, and a probe against the
+ * *wrong* address must not be reported as if it were the configured one.
+ *
+ * - `malformed`   — the supplied address is not a usable http(s) URL.
+ * - `refused`     — the connection was actively refused (nothing listening).
+ * - `timeout`     — the host accepted nothing within the probe budget.
+ * - `unreachable` — the host could not be reached at all (DNS, no route, or a
+ *                   blocked/denied connection such as macOS local-network
+ *                   permission).
+ * - `http`        — the address answered with a non-OK HTTP status.
+ * - `invalid`     — the address answered, but not with a JSON Ollama response.
+ */
+export type OllamaProbeFailureKind = 'malformed' | 'refused' | 'timeout' | 'unreachable' | 'http' | 'invalid';
+
+export class OllamaProbeError extends Error {
+  constructor(
+    readonly kind: OllamaProbeFailureKind,
+    message: string,
+    readonly status?: number,
+  ) {
+    super(message);
+    this.name = 'OllamaProbeError';
+  }
+}
+
+/**
+ * Normalize a user-supplied Ollama endpoint.
+ *
+ * Returns `undefined` for anything that is not a usable http(s) URL, so the
+ * caller can tell "no address configured" apart from "an address was given but
+ * is unusable" — the latter must be reported, never silently replaced by the
+ * localhost default.
+ */
+export function normalizeOllamaBaseUrl(value?: string | null): string | undefined {
+  const raw = value?.trim();
+  if (!raw) return undefined;
+  try {
+    const url = new URL(raw);
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.toString() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Strip the OpenAI-compatible `/v1` suffix to reach Ollama's native API. */
 function ollamaNativeBase(baseUrl: string): string {
   return (baseUrl || OLLAMA_BASE_URL).replace(/\/+$/, '').replace(/\/v1$/i, '');
 }
 
-async function ollamaFetch(baseUrl: string, path: string, timeoutMs = 3000): Promise<unknown> {
-  const response = await fetch(`${ollamaNativeBase(baseUrl)}${path}`, {
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  if (!response.ok) throw new Error(`Ollama ${path} returned ${response.status}`);
-  return await response.json();
+/** The `code` of a fetch failure, which lives on the error or its `cause`. */
+function transportErrorCode(err: unknown): string | undefined {
+  const cause = (err as { cause?: unknown })?.cause;
+  const code = (cause as { code?: unknown })?.code ?? (err as { code?: unknown })?.code;
+  return typeof code === 'string' ? code : undefined;
+}
+
+function transportErrorName(err: unknown): string | undefined {
+  const cause = (err as { cause?: unknown })?.cause;
+  const name = (cause as { name?: unknown })?.name ?? (err as { name?: unknown })?.name;
+  return typeof name === 'string' ? name : undefined;
+}
+
+/** Map a low-level fetch rejection onto something the UI can explain. */
+function classifyTransportError(err: unknown): OllamaProbeError {
+  const code = transportErrorCode(err);
+  const name = transportErrorName(err);
+
+  if (name === 'TimeoutError' || name === 'AbortError'
+    || code === 'ETIMEDOUT' || code === 'UND_ERR_CONNECT_TIMEOUT' || code === 'UND_ERR_HEADERS_TIMEOUT') {
+    return new OllamaProbeError('timeout', `timed out after ${OLLAMA_PROBE_TIMEOUT_MS}ms`);
+  }
+  if (code === 'ECONNREFUSED' || code === 'ECONNRESET' || code === 'EPIPE') {
+    return new OllamaProbeError('refused', 'connection refused');
+  }
+  // Everything else (ENOTFOUND/EAI_AGAIN, EHOSTUNREACH/ENETUNREACH, a blocked
+  // local-network connection, or a bare "fetch failed" with no code) means the
+  // host could not be reached — which is not the same as "it was too slow".
+  return new OllamaProbeError('unreachable', err instanceof Error ? err.message : String(err));
+}
+
+async function ollamaFetch(baseUrl: string, path: string, timeoutMs = OLLAMA_PROBE_TIMEOUT_MS): Promise<unknown> {
+  let response: Response;
+  try {
+    response = await fetch(`${ollamaNativeBase(baseUrl)}${path}`, {
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (err) {
+    throw classifyTransportError(err);
+  }
+  if (!response.ok) {
+    throw new OllamaProbeError('http', `Ollama ${path} returned ${response.status}`, response.status);
+  }
+  try {
+    return await response.json();
+  } catch {
+    throw new OllamaProbeError('invalid', `Ollama ${path} did not return JSON`);
+  }
 }
 
 /**
@@ -1490,9 +1583,27 @@ export async function discoverOllamaModels(baseUrl: string): Promise<{
   return { version, models };
 }
 
-/** Report Copilot model availability plus local Ollama discovery. */
-export async function getCopilotModelsStatus(options: { offline?: boolean } = {}): Promise<ModelsStatus> {
-  const baseUrl = process.env.OLLAMA_BASE_URL || OLLAMA_BASE_URL;
+/**
+ * Report Copilot model availability plus local Ollama discovery.
+ *
+ * `baseUrl` is the endpoint the *client* has configured (e.g. a LAN machine
+ * running Ollama). It must be honoured here: probing the localhost default
+ * instead is what made a remote server look permanently unreachable, which in
+ * turn left the UI with an empty model list and a permanently disabled
+ * composer. Precedence is explicit request → `OLLAMA_BASE_URL` env → default.
+ */
+export async function getCopilotModelsStatus(
+  options: { offline?: boolean; baseUrl?: string } = {},
+): Promise<ModelsStatus> {
+  const requested = options.baseUrl?.trim();
+  const explicitBaseUrl = requested ? normalizeOllamaBaseUrl(requested) : undefined;
+  // A supplied-but-unusable address is an error to report, not a reason to
+  // quietly probe localhost and blame the user's machine for not running Ollama.
+  const malformedBaseUrl = !!requested && !explicitBaseUrl;
+
+  const baseUrl = explicitBaseUrl
+    ?? normalizeOllamaBaseUrl(process.env.OLLAMA_BASE_URL)
+    ?? OLLAMA_BASE_URL;
 
   // In offline mode the CLI is pinned to a local provider and is deliberately
   // not authenticated with GitHub, so asking it for the Copilot model catalogue
@@ -1507,7 +1618,9 @@ export async function getCopilotModelsStatus(options: { offline?: boolean } = {}
           const client = await getCopilotClient();
           return await client.listModels();
         })(),
-    discoverOllamaModels(baseUrl),
+    malformedBaseUrl
+      ? Promise.reject(new OllamaProbeError('malformed', `Not an http(s) URL: ${requested}`))
+      : discoverOllamaModels(baseUrl),
   ]);
 
   const copilotOk = copilotResult.status === 'fulfilled';
@@ -1531,6 +1644,11 @@ export async function getCopilotModelsStatus(options: { offline?: boolean } = {}
     ? 'GitHub Copilot is not signed in. Local Ollama models are available in Provider Settings.'
     : 'Sign in to GitHub Copilot in your terminal, or enable BYOK provider settings.';
 
+  if (!ollamaAvailable) {
+    // Log the real cause once; the returned message is the actionable summary.
+    console.warn('[ollama] discovery failed', ollamaResult.reason);
+  }
+
   return {
     models,
     copilot: copilotOk
@@ -1541,9 +1659,40 @@ export async function getCopilotModelsStatus(options: { offline?: boolean } = {}
       : {
           available: false,
           models: [],
-          message: `No Ollama server responded at ${ollamaBaseForMessage(baseUrl)}.`,
+          message: ollamaUnavailableMessage(malformedBaseUrl ? requested! : baseUrl, ollamaResult.reason),
         },
   };
+}
+
+/**
+ * Turn a probe failure into one short line naming the address that failed.
+ *
+ * The address is always part of the message: the previous wording named
+ * `localhost:11434` even when the user had pointed the app at another machine,
+ * which sent them looking in the wrong place. Keep each line to a single
+ * clause — the status footer has very little room.
+ */
+function ollamaUnavailableMessage(baseUrl: string, reason: unknown): string {
+  const host = ollamaBaseForMessage(baseUrl);
+
+  if (reason instanceof OllamaProbeError) {
+    switch (reason.kind) {
+      case 'malformed':
+        return `Invalid Ollama address: ${baseUrl}`;
+      case 'refused':
+        return `Ollama is not running at ${host}`;
+      case 'timeout':
+        return `Ollama at ${host} did not respond`;
+      case 'unreachable':
+        return `Ollama at ${host} is not reachable`;
+      case 'http':
+        return `No Ollama server at ${host} (HTTP ${reason.status ?? 'error'})`;
+      case 'invalid':
+        return `No Ollama server at ${host}`;
+    }
+  }
+
+  return `No Ollama server responded at ${host}`;
 }
 
 /** Distinguishes "not signed in" from real failures (spawn errors, crashes). */
