@@ -44,15 +44,34 @@ const { data: votes } = await useLazyFetch(`/api/chats/${route.params.id}/votes`
 const input = ref('');
 
 /**
- * True from the moment a turn is sent until the stream settles.
+ * The turn currently being waited on, or `null` when nothing is in flight.
  *
- * Set explicitly on every send/regenerate rather than inferred from
- * `chat.status`: the AI SDK flips to `streaming` as soon as the response
- * *headers* arrive, while the assistant placeholder message is installed a
- * tick later. A derived indicator therefore flickers off during that gap —
- * and that gap is exactly where a local model spends its whole prompt prefill.
+ * This is an id rather than a boolean so that stale callbacks cannot settle a
+ * *newer* turn: a waiter only clears the state while the id it belongs to is
+ * still the live one. A plain flag is exactly what made the wait row vanish on
+ * every prompt after the first — the placeholder `sendMessage` pushes carries no
+ * output yet, but an earlier turn's answer does, and any check that looks at the
+ * whole conversation sees that answer and settles the new wait on the spot.
+ *
+ * The wait is driven from here rather than from `UChatMessages`' own indicator
+ * on purpose: that requires the last assistant message to have *zero parts*,
+ * while the server writes a `data-chat-title` part about a second into the turn,
+ * so it goes false for the rest of the prefill (measured: the indicator was
+ * absent for a whole 51s wait, until the answer began).
  */
-const pendingTurn = ref(false);
+const activeTurn = ref<number | null>(null);
+let turnCounter = 0;
+
+/** Arm the wait for a fresh turn. Called on every send path and on `submitted`/`streaming`. */
+function beginTurn() {
+  turnCounter += 1;
+  activeTurn.value = turnCounter;
+}
+
+/** Settle the wait — but only if `turn` (default: the current turn) is still the live one. */
+function endTurn(turn = activeTurn.value) {
+  if (turn === activeTurn.value) activeTurn.value = null;
+}
 
 const chat = new Chat({
   id: data.value?.id,
@@ -79,7 +98,7 @@ const chat = new Chat({
     }
   },
   onError(error) {
-    pendingTurn.value = false;
+    endTurn();
     let message = error.message;
     if (typeof message === 'string' && message[0] === '{') {
       try {
@@ -97,7 +116,6 @@ const chat = new Chat({
     });
   },
   onFinish: ({ messages }) => {
-    pendingTurn.value = false;
     updateCachedMessages(messages);
     void refreshNuxtData(`chat-${data.value!.id}`);
   },
@@ -177,7 +195,7 @@ async function handleSubmit(e: Event) {
   // Sending without a resolved model id would reach the provider as an opaque
   // "Resource not found" 404, so block it at the source.
   if (input.value.trim() && !uploading.value && !modelSetupRequired.value && !modelUnavailable.value) {
-    pendingTurn.value = true;
+    beginTurn();
     chat.sendMessage({
       text: input.value,
       files: uploadedFiles.value.length > 0 ? uploadedFiles.value : undefined,
@@ -208,7 +226,7 @@ async function saveEdit(message: UIMessage, text: string) {
   }
 
   editingMessageId.value = null;
-  pendingTurn.value = true;
+  beginTurn();
   chat.sendMessage({ text, messageId: message.id });
 }
 
@@ -224,7 +242,7 @@ async function regenerateMessage(message: UIMessage) {
     return;
   }
 
-  pendingTurn.value = true;
+  beginTurn();
   chat.regenerate({ messageId: message.id });
 }
 
@@ -271,7 +289,7 @@ async function bootstrapInitialAssistantResponse() {
   updateChatData(latest);
 
   if (latest.messages.length === 1) {
-    pendingTurn.value = true;
+    beginTurn();
     chat.regenerate();
   }
 }
@@ -293,54 +311,111 @@ watch(
 );
 
 /**
- * The wait before any content exists. For a local model this is prompt prefill:
- * the provider must read the entire system prompt and tool definitions before
- * the first token can be produced, and a new session has no cached prefix to
- * reuse. On a fast host it is imperceptible; locally it dominates a new chat.
- */
-const awaitingFirstToken = computed(() => {
-  if (!pendingTurn.value) return false;
-  const messages = chat.messages as UIMessage[];
-  return !messages.some(hasSubstantiveContent);
-});
-
-/**
- * Whether a message carries anything a user can actually see.
+ * Whether the model has produced anything the user can actually see.
  *
- * Counting parts is not enough: the server writes its first chunks (the
- * assistant `start` and a `data-chat-title`) before the model has produced
- * anything, so the placeholder already holds an *empty* text part for the whole
- * wait. Only non-empty text/reasoning or a tool call means the model has begun.
+ * This has to mean *visible*, not merely "a part exists". The server writes
+ * several parts before the model has emitted a character:
+ *   - the assistant `start` chunk installs an empty **text** part;
+ *   - a `data-chat-title` chunk can arrive on the first turn (title generated);
+ *   - the reasoning stream opens with an empty **reasoning** part, which is the
+ *     one that caused the "empty window": treating it as output ended the wait
+ *     while there was still nothing on screen, and the first real reasoning
+ *     text only arrived tens of seconds later.
+ * So text/reasoning only count once they carry a non-empty string, and tool
+ * calls (which are real model output) count unconditionally.
  */
-function hasSubstantiveContent(message: UIMessage): boolean {
+function hasModelOutput(message: UIMessage): boolean {
   if (message.role !== 'assistant') return false;
-  return (message.parts ?? []).some((part) => {
-    if (part.type === 'text' || part.type === 'reasoning') return !!part.text?.trim();
-    if (part.type.startsWith('tool-')) return true;
-    // Side-channel parts (chat title, files, sources…) are not model output and
-    // must not be mistaken for the answer having started.
+  const parts = (message.parts ?? []) as Array<{ type?: string; text?: string }>;
+  return parts.some((part) => {
+    if (part.type === 'text' || part.type === 'reasoning') {
+      return typeof part.text === 'string' && part.text.trim().length > 0;
+    }
+    if (part.type?.startsWith('tool-')) return true;
     return false;
   });
 }
 
-/** Explain the wait only where it is actually long: a local model. */
-const showFirstTokenNote = computed(() => awaitingFirstToken.value && isOllama.value);
+/**
+ * Whether this is the app's very first reply in this chat.
+ *
+ * That is the only turn whose wait includes loading the model and prefilling
+ * the whole system prompt and tool schema set from cold, so it is the only one
+ * that gets the "first token" wording and the hardware note. Later turns still
+ * have to think before emitting anything, but they must not claim to be waiting
+ * for a "first token".
+ */
+const isFirstTurn = computed(() => {
+  const messages = chat.messages as UIMessage[];
+  return messages.filter((message) => message.role === 'user').length === 1
+    && !messages.some(hasModelOutput);
+});
+
+const showFirstTokenNote = computed(() => isFirstTurn.value && isOllama.value);
 
 /**
- * Sentinel id for the inline waiting row. It is styled like an assistant
- * message and rendered through the normal message flow so it inherits the list
- * spacing and alignment instead of floating below the whole list.
+ * Id of the synthetic row that carries the wait UI.
+ *
+ * A dedicated message is required rather than reusing the in-flight assistant
+ * one: `UChatMessages` renders the list through its default slot, whose first
+ * guard is `v-if="message.parts?.length"`, so a message with no parts is skipped
+ * entirely. The server writes a `data-chat-title` part into the assistant
+ * placeholder on the first turn only, which is why the wait used to appear for
+ * the first prompt and never again — on every later turn the placeholder has
+ * zero parts, nothing is rendered for it, and a wait row inside its `#content`
+ * slot has no element to live in. Measured: the array held
+ * `assistant:<id>:0` while the DOM rendered only the three older messages.
  */
-const WAITING_ROW_ID = '__waiting-for-first-token__';
+const WAITING_ROW_ID = '__waiting-for-model__';
 
+/**
+ * What `UChatMessages` should render: the real messages, plus a synthetic
+ * assistant row when the current turn has not produced a renderable message
+ * yet. Once the placeholder gains its first part it renders normally and the
+ * synthetic row drops out on its own, so there is no swap and no layout jump.
+ */
 const renderMessages = computed<UIMessage[]>(() => {
   const messages = chat.messages as UIMessage[];
-  if (!awaitingFirstToken.value) return messages;
-  // `parts` must be non-empty: UChatMessages skips messages without parts, and
-  // the placeholder part is never rendered because we own the #content slot.
+  if (activeTurn.value === null) return messages;
+
+  const inFlight = messages.findLast((message) => message.role === 'assistant');
+  if (!inFlight || (inFlight.parts ?? []).length > 0) return messages;
+
   const row = { id: WAITING_ROW_ID, role: 'assistant', parts: [{ type: 'step-start' }] } as unknown as UIMessage;
   return [...messages, row];
 });
+
+/**
+ * End the wait as soon as the model produces anything.
+ *
+ * `deep` + watching the ref itself (rather than reading nested properties in
+ * the getter) is load-bearing: the getter form stops firing after a completed
+ * turn, because the AI SDK's `onFinish` bookkeeping replaces the message objects
+ * and the old per-property dependency goes stale.
+ *
+ * What is checked matters just as much: the *in-flight* message, not the whole
+ * conversation. `sendMessage` pushes the new assistant placeholder after the
+ * previous turn's answer is already in the array, so checking every message
+ * finds that answer and settles the new wait the instant it starts.
+ */
+watch(
+  () => chat.messages,
+  (messages) => {
+    const inFlight = (messages as UIMessage[]).findLast((message) => message.role === 'assistant');
+    if (inFlight && hasModelOutput(inFlight)) endTurn();
+  },
+  { deep: true },
+);
+
+// A new turn begins as soon as the client starts one, whichever arrives first;
+// `beginTurn` is also called directly on every send path.
+watch(
+  () => chat.status,
+  (status) => {
+    if (status === 'submitted' || status === 'streaming') beginTurn();
+    else if (status === 'ready') endTurn();
+  },
+);
 </script>
 
 <template>
@@ -376,57 +451,112 @@ const renderMessages = computed<UIMessage[]>(() => {
         <DragDropOverlay v-if="false && isOwner" :show="dragging" />
 
         <UContainer class="flex-1 flex flex-col gap-4 sm:gap-6">
-          <UChatMessages
-            should-auto-scroll
-            :messages="renderMessages"
-            :status="chat.status"
-            :spacing-offset="isOwner ? 160 : 0"
-            class="pt-(--ui-header-height) pb-4 sm:pb-6"
-          >
-            <template #files="{ message, parts }">
-              <ChatFilePreview
-                v-for="(part, index) in parts"
-                :key="`${message.id}-${index}`"
-                :name="getFileName(part.url)"
-                :type="part.mediaType"
-                :preview-url="part.url"
-                size="3xl"
-              />
-            </template>
+          <!--
+            `self-start` keeps `UChatMessages` at its natural height instead of
+            letting its `flex-1` root stretch to the bottom of the pane. Without
+            it the message list claims the whole viewport regardless of how much
+            is in it.
+          -->
+          <div class="flex w-full flex-col gap-4 self-start sm:gap-6">
+            <UChatMessages
+              should-auto-scroll
+              :messages="renderMessages"
+              :status="chat.status"
+              :spacing-offset="isOwner ? 160 : 0"
+              class="pt-(--ui-header-height) pb-4 sm:pb-6"
+            >
+              <template #files="{ message, parts }">
+                <ChatFilePreview
+                  v-for="(part, index) in parts"
+                  :key="`${message.id}-${index}`"
+                  :name="getFileName(part.url)"
+                  :type="part.mediaType"
+                  :preview-url="part.url"
+                  size="3xl"
+                />
+              </template>
 
-            <template #content="{ message }">
-              <!-- Inline waiting row: the local model is reading the whole prompt
-                   before it can emit anything. Rendered as a message so it sits
-                   flush with the rest of the conversation. -->
-              <div v-if="message.id === WAITING_ROW_ID" class="flex flex-wrap items-center gap-x-2 gap-y-1 text-pretty text-sm">
-                <ChatIndicator />
-                <UChatShimmer text="Waiting for first token…" class="text-sm" />
-                <span v-if="showFirstTokenNote" class="w-full text-muted">
-                  This may take a while for local models — depending on the hardware
-                </span>
-              </div>
+              <!--
+                Claim the `indicator` slot with something hidden, so the component's
+                built-in three-dot default never renders.
 
-              <ChatMessageContent
-                v-else
-                :message="message"
-                :editing="isOwner && editingMessageId === message.id"
-                @save="saveEdit"
-                @cancel-edit="editingMessageId = null"
-              />
-            </template>
+                It cannot be used to *show* the wait: it only renders while
+                `showIndicator()` is true, which requires the last assistant message
+                to have *zero parts*. The server writes a `data-chat-title` part
+                about a second into the turn, so the condition is already false for
+                the rest of the prefill (measured: `data-slot="indicator"` absent
+                for a whole 51s wait). The same is true of the empty-slot
+                suppression people assume works — there was simply nothing there.
+              -->
+              <template #indicator>
+                <span hidden aria-hidden="true" />
+              </template>
 
-            <template v-if="isOwner" #actions="{ message }">
-              <ChatMessageActions
-                :message="message"
-                :streaming="chat.status === 'streaming' && message.id === chat.messages[chat.messages.length - 1]?.id"
-                :editing="editingMessageId === message.id"
-                :vote="getVote(message.id)"
-                @vote="(_message, isUpvoted) => vote(_message, isUpvoted)"
-                @edit="startEdit"
-                @regenerate="regenerateMessage"
-              />
-            </template>
-          </UChatMessages>
+              <!--
+                The wait row matches *two* kinds of message on purpose, and both
+                are needed:
+                  - the synthetic `WAITING_ROW_ID`, which is the only thing on
+                    screen while the placeholder still has zero parts (every turn
+                    after the first, since `UChatMessages` skips partless
+                    messages);
+                  - the real in-flight assistant message, which is what renders on
+                    the first turn, because the server writes a `data-chat-title`
+                    part into it about a second in. Matching only the synthetic row
+                    removed the first prompt's indicator entirely: `isFirstTurn`
+                    is false for a row that carries no output, so it took the
+                    three-dot branch and the "first token" wording never appeared.
+
+                Behaving as one element matters too: the two never show at the same
+                time (the synthetic row is only added while the placeholder has no
+                parts), so the wording switches from "first token" to dots exactly
+                where it used to.
+              -->
+              <template #content="{ message }">
+                <div
+                  v-if="activeTurn !== null && (message.id === WAITING_ROW_ID || (message.role === 'assistant' && !hasModelOutput(message)))"
+                  class="text-pretty text-sm"
+                >
+                  <!-- First reply: name the wait, because it includes loading the
+                       model and prefilling everything from cold. -->
+                  <div v-if="isFirstTurn" class="flex flex-wrap items-center gap-x-2 gap-y-1">
+                    <ChatIndicator />
+                    <UChatShimmer text="Waiting for first token…" class="text-sm" />
+                    <span v-if="showFirstTokenNote" class="w-full text-muted">
+                      This may take a while for local models — depending on the hardware
+                    </span>
+                  </div>
+
+                  <!-- Later replies: the same three-dot affordance the component
+                       renders by default. -->
+                  <div v-else class="flex h-6 items-center gap-1 py-3" aria-label="Waiting for the model">
+                    <span class="size-2 rounded-full bg-elevated motion-safe:animate-[bounce_1s_infinite]" />
+                    <span class="size-2 rounded-full bg-elevated motion-safe:animate-[bounce_1s_0.15s_infinite]" />
+                    <span class="size-2 rounded-full bg-elevated motion-safe:animate-[bounce_1s_0.3s_infinite]" />
+                  </div>
+                </div>
+
+                <ChatMessageContent
+                  v-else
+                  :message="message"
+                  :editing="isOwner && editingMessageId === message.id"
+                  @save="saveEdit"
+                  @cancel-edit="editingMessageId = null"
+                />
+              </template>
+
+              <template v-if="isOwner" #actions="{ message }">
+                <ChatMessageActions
+                  :message="message"
+                  :streaming="chat.status === 'streaming'"
+                  :editing="editingMessageId === message.id"
+                  :vote="getVote(message.id)"
+                  @vote="(_message, isUpvoted) => vote(_message, isUpvoted)"
+                  @edit="startEdit"
+                  @regenerate="regenerateMessage"
+                />
+              </template>
+            </UChatMessages>
+          </div>
 
           <UAlert
             v-if="isOwner && modelUnavailable"
