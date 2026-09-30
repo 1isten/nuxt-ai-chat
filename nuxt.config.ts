@@ -64,7 +64,7 @@ export default defineNuxtConfig({
       ],
     },
     fonts: true,
-    prose: false,
+    // prose: false,
   },
 
   /**
