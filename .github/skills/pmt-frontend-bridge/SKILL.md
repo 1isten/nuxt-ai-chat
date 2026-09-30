@@ -10,9 +10,10 @@ This skill lets you interact with the host application's frontend while it is ru
 - Statistics or summaries of what they have parsed/loaded (patient/study/series/instance counts, modality breakdown, etc.)
 - Listing patients, studies, or series currently visible in the viewer
 - Listing **manual (non-DICOM) patients**, the **10 per-patient data types** (see the list in "Project model & data keys" below — do not guess them), the patient-independent **Analysis Results** panel, and **Other Files**
+- Building a **Data Package** (Target → Package → Item) out of tree items and Analysis Results files, and exporting it as a manifest
 - Reading the embedded VolView viewer's parent-mirrored state (mounted status, active view/data IDs, latest slicing event, current image/slice metadata)
 - Answering "what am I looking at right now" — including non-DICOM files open in a module tab that covers the image viewer
-- Performing UI actions on their behalf (open something in the embedded viewer, expand/collapse the tree, reveal a file in the OS file manager, create/merge manual patients, add files to Analysis Results)
+- Performing UI actions on their behalf (open something in the embedded viewer, expand/collapse the tree, reveal a file in the OS file manager, create/merge manual patients, add files to Analysis Results or a package)
 
 ## Terminology
 
@@ -73,8 +74,9 @@ The app moved to a **Project** model (v6 Phase 0). The bridge now exposes the fu
   - `pmt-patient-immunization` — Immunization
   - `pmt-patient-medication` — Medication
   - `pmt-patient-other-modality` — Other
-- **Analysis Results** is a patient-independent store for analysis outputs (e.g. a summary spreadsheet the assistant builds from many patients). It is NOT part of the parsed tree — it lives in a toolbar panel opened by the `openAnalysisResults` command (or the chart icon in the drawer toolbar), with one vertical tab per data type. Read it via `GET /api/frontend/parsed/analysis-results`; it is a `{ categoryKey: [ {assetId, name, extension, mimeType, byteSize}, … ] }` map keyed by the same 10 data-type keys. Write to it with `addAnalysisResults` / `createAnalysisResultNote` / `createAnalysisResultSpreadsheet`, then call `openAnalysisResults` to show the result (it focuses the tab and flashes the file row).
+- **Analysis Results** is a patient-independent store for analysis outputs (e.g. a summary spreadsheet the assistant builds from many patients). It is NOT part of the parsed tree — it lives in a toolbar panel opened by the `openAnalysisResults` command (or the chart icon in the drawer toolbar), with one vertical tab per data type. Read it via `GET /api/frontend/parsed/analysis-results`; it is a `{ categoryKey: [ {assetId, name, extension, mimeType, byteSize}, … ] }` map keyed by the same 10 data-type keys. The full write set is `addAnalysisResults` (create from existing files), `createAnalysisResultNote` / `createAnalysisResultSpreadsheet` (create new), `replaceAnalysisResult` (update content/name — **the `assetId` changes**), `removeAnalysisResult` (delete); then call `openAnalysisResults` / `closeAnalysisResults` / `setAnalysisResultsFilter` for the panel. **To read a file's content, turn its `assetId` into an `asset:<assetId>` ref and resolve it** (see "Reading the actual files" below).
 - **Other Files** (non-DICOM, not attached to any patient) is exposed via `GET /api/frontend/parsed/other-files` as `{ "<extension>": [ {name, path, sourceRootId, relativePath}, … ] }`.
+- **Data Packaging** is the delivery model: a **Target** (a recipient/destination) contains **Packages**, each containing **Items**. An item is a *reference* to something that already exists (a tree entity, a timepoint, an Analysis Results file) — never a copy — so it is resolved live and an item whose target no longer resolves is reported `stale: true` rather than dropped. Read the whole tree with `GET /api/frontend/packaging`; build it with the `createDataPackage*` / `addDataPackageItem` commands; produce the delivery manifest with `exportDataPackage`. See "Data Packaging" below.
 
 ### Quick reference: what each `key` means per level
 
@@ -199,6 +201,7 @@ All return JSON.
 |---|---|
 | `/api/frontend/health` | Liveness probe. |
 | `/api/frontend/volview/summary` | Embedded VolView parent-mirrored state: `{ mounted, activeViewID, activeViewDataID, activeViewDataIDByView, lastSlicing, lastSlicingAt, loadingUIDs }`. Use this before answering questions about the current active VolView pane/slice. |
+| `/api/frontend/packaging` | **Data Packaging**: `{ targets: [ { id, name, position, packageCount, itemCount, packages: [ { id, targetId, name, position, itemCount, staleCount, fileCount, items: [ { itemId, kind, ref, name, parentPath, stale, kindLabel, typeLabel, dataType, fileCount } ] } ] } ], itemKinds, meta }`. Every item is resolved **live** against the tree / Analysis Results, so `name` is the real display name and `stale: true` means its target no longer exists (the item is still stored — say so, do not drop it silently). `itemKinds` documents the ref shape each `kind` needs. Narrow with `?targetId=` / `?packageId=`. |
 | `/api/frontend/current` | **What the user is looking at right now** — the answer to "which file am I viewing?". `{ lookingAt: { kind: 'module-tab' \| 'module-window' \| 'volview', confidence, basis, file, module }, focusedWindow, moduleWindows, moduleOverlay, volview }`. See "What the user is looking at" below. |
 | `/api/frontend/volview/current` | Detailed **VolView context** — what the viewer *holds*, which is NOT necessarily what the user sees: it keeps reporting the last DICOM slice while a module tab covers the viewer. Includes the summary fields plus `state`, where `state.activeView`, `state.views`, `state.layout`, `state.currentImage.metadata`, `state.currentSlice.config`, `state.currentSlice.metadata`, `state.currentSlice.dicomTags`, and `state.windowLevel` describe the current viewer pane/image/slice. Use this when the user asks about the VolView pane itself (image dimensions/spacing/orientation, DICOM tags of the current slice, window/level, layout/active pane) — and pair it with `/current` whenever the question is "what am I looking at". `dicomTags` is `null` for non-DICOM data. |
 | `/api/frontend/volview/snapshot` | On-demand active VolView pane snapshot. Returns the active pane context plus `image` as a cropped PNG data URL, `currentSlicePixels` as compact scalar statistics/histogram for 2D views, and optionally `currentSlicePixelGrid` as downsampled scalar rows. Query options: `includeImage=false`, `includeHistogram=false`, `includePixels=true`, `maxWidth=768`, `maxHeight=768`, `bins=64`, `pixelWidth=64`, `pixelHeight=64`. Pixel grids are clamped to 128x128. Use this for visual/screenshot-style prompts, histogram/pixel-summary prompts, or bounded raw-scalar inspection. Do not print the full `image.dataURL` in chat unless explicitly needed; summarize it or omit it with `jq 'del(.image.dataURL)'`. |
@@ -221,8 +224,7 @@ All return JSON.
 | `/api/frontend/project` | The **current Project** plus its source roots: `{ project: { projectId, name, packagePath, state, projectSessionId, projectEpoch } \| null, sourceRoots: [...] }`. `packagePath` is the absolute path of the `.pmtaro-project` package on disk (it is deliberately never sent to the renderer, so this endpoint is the only way to learn it). `project` is `null` when no Project is open. |
 | `/api/frontend/tree` | **The patient tree in the order the user sees it.** One ordered, multimodal tree: per patient, DICOM studies and non-DICOM timepoint bundles interleaved on the date axis, plus patient-level branches (e.g. Demographic Data) and the "Other Files" section. Every node carries the exact `keys` tuple the dispatch commands take. Query: `patientKey=<key>` (one patient), `files=false` (structure only — no file leaves, branches keep an honest `hasChildren`), `visible=true` (only what is currently expanded, i.e. what the user can see right now). Response `{ nodes, rootIds, patientKeys, meta }`. **Start here for anything tree-shaped.** See "The patient tree" below. |
 | `POST /api/frontend/file/resolve` | Turn data-file refs into **real filesystem paths**. Body `{ "ref": "evidence:<sourceRootId>:<relativePath>" }` or `{ "ref": "asset:<assetId>" }` → `{ file: { ref, path, name, exists, kind, byteSize, refType, error } }`. Batch form: `{ "refs": [ ... ] }` (max 200) → `{ files: [ ... ] }`. `path` is absolute and already realpath-resolved; `exists:false` means the file is missing/moved (for `evidence:` refs a best-effort intended path is still returned so you can say *where* it should be). Non-refs (`/abs/path`) are rejected. |
-| `/api/frontend/ui/state` | Frontend panel state: `{ ui: { analysisResults: { open, category, highlight }, dataPackaging: { open, selectedPackageId, filter, highlight } } }`. Use this to confirm a panel actually opened/selected what you asked for, instead of assuming. Also present under `/state` as `ui`. |
-| `/api/frontend/labeling/definitions` | Global label definitions: `{ labels: { "LabelName": "#hexcolor", ... }, systemLabels: [ ... ] }`. `systemLabels` are the 10 reserved per-patient category labels — do not rename/recolor/delete them. |
+| `/api/frontend/ui/state` | Frontend panel state: `{ ui: { analysisResults: { open, category, filter, highlight }, dataPackaging: { open, selectedPackageId, filter, highlight } } }`. Use this to confirm a panel actually opened/selected what you asked for, instead of assuming. `category` is the **data-type tab actually on screen** (it follows the user's tab clicks, not just your last command); `filter` is the panel's file-name filter. Also present under `/state` as `ui`. || `/api/frontend/labeling/definitions` | Global label definitions: `{ labels: { "LabelName": "#hexcolor", ... }, systemLabels: [ ... ] }`. `systemLabels` are the 10 reserved per-patient category labels — do not rename/recolor/delete them. |
 | `POST /api/frontend/labeling/query` | Query label assignments. Body: `{ "root": "<sourceRootId>", "keys": ["patientKey", ...] }` → `{ root, keys, labels: ["LabelA", ...] }`. Body `{ "root": "<sourceRootId>" }` (no keys) → `{ root, assignments: { "<dicomEntityId>": ["LabelA"] } }`. Body `{}` → `{ labels, systemLabels }` (all definitions). |
 | `/api/frontend/state` | Full mirror of relevant Pinia state (`parsedData`, `volview`, `volviewCurrent`, `labeling`, `project.sourceRoots`, `timeline`, `tree`, `ui`). Larger; only fetch when summaries aren't enough. `parsedData` is the *raw* store projection (every patient/study/series/instance plus category files), whereas `/tree` is the same data arranged as the user's ordered tree — prefer `/tree` unless you need the raw shape. |
 | `/api/frontend/ui/commands` | Lists allowed UI command names. |
@@ -278,6 +280,96 @@ Rules:
   directly), and `lookingAt.file.ref` is the tree ref if you need the tree side.
 - To ask what they see *in the image*, use `/volview/snapshot` or `/volview/current` — and if
   `lookingAt.kind` is `module-tab`, say so, because the VolView pixels are then hidden behind a module.
+
+### Analysis Results — create, show, verify, read back
+
+The panel is a flat store of managed files organised under the 10 data-type tabs; it is deliberately
+NOT part of the patient tree. A complete round trip:
+
+1. **Create** — `createAnalysisResultNote {category, name, content}` or `createAnalysisResultSpreadsheet
+   {category, name, csvText, type}`; or `addAnalysisResults {category, paths}` to bring in files that
+   already exist (tree refs and real paths both work).
+2. **Show** — `openAnalysisResults {category, name}` (or `assetId`). It opens the panel, selects the tab,
+   clears the filter and flashes the row.
+3. **Verify** — `GET /api/frontend/ui/state` → `ui.analysisResults` (`open`, `category`, `filter`). Do not
+   claim the user can see something without checking.
+4. **Read back** — `GET /api/frontend/parsed/analysis-results` for the `assetId`, then build
+   `asset:<assetId>` and resolve it (see "Reading the actual files"), or just keep the content you wrote.
+5. **Update** — `replaceAnalysisResult {category, assetId, name, content}`. It writes a **new** managed
+   asset and purges the old one when nothing else references it, so **the `assetId` changes**; use the id
+   it returns for any follow-up (`openAnalysisResults` with the stale id flashes nothing).
+6. **Delete** — `removeAnalysisResult {category, assetId}` — confirm with the user first; it is destructive.
+
+Text formats (`.txt`, `.md`, `.csv`) round-trip faithfully through `content` / `csvText`. For binary
+files, prefer `addAnalysisResults` with a real path so the app makes the managed copy.
+
+### Data Packaging — Target → Package → Item
+
+This is the **export step** of the working flow (import data → analyse it → deliver it). A **Target**
+is where data goes, a **Package** is one delivery to that target, and an **Item** is a reference to
+something in the Project.
+
+```sh
+curl -s -H "Authorization: Bearer $FRONTEND_BRIDGE_TOKEN" \
+  "$FRONTEND_BRIDGE_URL/api/frontend/packaging" \
+  | jq '{meta, targets: [.targets[] | {name, packages: [.packages[] | {name, itemCount, staleCount, fileCount}]}]}'
+```
+
+**Items are references, resolved live.** An item stores only a ref; the read model resolves the current
+display name, the file count, and whether it is still `stale`. Nothing is copied or snapshotted until
+`exportDataPackage` writes the manifest.
+
+**Build a ref from what `/api/frontend/tree` gave you.** `entityId` / `patientEntityId` values are the
+node's `dicomEntityId`; `timepointKey` and `fileRef` are segments of the node's `keys`:
+
+| `kind` | ref | where the values come from |
+|---|---|---|
+| `patient` | `{ entityId }` | patient node's `dicomEntityId` (contains everything under it) |
+| `study` / `series` / `instance` | `{ entityId }` | that node's `dicomEntityId` |
+| `timepoint` | `{ patientEntityId, timepointKey }` | patient node's `dicomEntityId` + timepoint node's `keys[1]` (`"tp\|2025-01-15"`, `"tp\|unassigned"`) |
+| `timepoint_file` | `{ patientEntityId, timepointKey, fileRef, dataType? }` | + file node's `keys[2]`; add `dataType` only to disambiguate a file stored under several data types |
+| `patient_level_file` | `{ patientEntityId, dataType, fileRef }` | `dataType` is **required** here (e.g. `pmt-patient-demographic-data`) |
+| `analysis_catalogue` | `{ catalogue }` | a data-type key — every Analysis Results file in that catalogue |
+| `analysis_catalogue_file` | `{ catalogue, assetId }` | from `/api/frontend/parsed/analysis-results` |
+
+The same table is returned by the endpoint as `itemKinds` — read it rather than guessing.
+
+**Typical flow** (create as you go, then export):
+
+```sh
+# 1. target, then package
+TARGET=$(curl -s -H "Authorization: Bearer $FRONTEND_BRIDGE_TOKEN" -H 'Content-Type: application/json' -X POST \
+  -d '{"command":"createDataPackageTarget","payload":{"name":"Delivery A"}}' \
+  "$FRONTEND_BRIDGE_URL/api/frontend/ui/dispatch" | jq -r '.result.id')
+PKG=$(curl -s -H "Authorization: Bearer $FRONTEND_BRIDGE_TOKEN" -H 'Content-Type: application/json' -X POST \
+  -d "{\"command\":\"createDataPackage\",\"payload\":{\"targetId\":\"$TARGET\",\"name\":\"Baseline\"}}" \
+  "$FRONTEND_BRIDGE_URL/api/frontend/ui/dispatch" | jq -r '.result.id')
+
+# 2. add items (repeat per item; see the ref table above)
+curl -s -H "Authorization: Bearer $FRONTEND_BRIDGE_TOKEN" -H 'Content-Type: application/json' -X POST \
+  -d "{\"command\":\"addDataPackageItem\",\"payload\":{\"packageId\":\"$PKG\",\"ref\":{\"kind\":\"patient\",\"entityId\":\"<patientEntityId>\"}}}" \
+  "$FRONTEND_BRIDGE_URL/api/frontend/ui/dispatch"
+# -> {"ok":true,...,"result":{"created":true,"duplicate":false,"item":{...}}}
+#    an item that is already in the package is NOT an error: {"created":false,"duplicate":true,"item":null}
+
+# 3. show it, then export the manifest
+curl ... -d '{"command":"openDataPackaging","payload":{"packageId":"<id>"}}' ...
+curl ... -d '{"command":"exportDataPackage","payload":{"packageId":"<id>"}}' ...
+# -> {"result":{"manifestPath":"<project>/artifacts/packages/<id>.json","fileCount":N,"warningCount":M}}
+```
+
+Rules:
+
+- **`addDataPackageItem` answers three ways** and they must not be conflated: `created:true` (added),
+  `created:false, duplicate:true` (the identical item was already there — a no-op, **not** an error), or
+  an HTTP 500 (the call failed). Report the duplicate case as "already in the package", not as a failure.
+- A package with **no items cannot be exported** — that is an error, not an empty manifest.
+- **Deleting a target deletes its packages** (and their items). Confirm with the user first; the same goes
+  for `removeDataPackage` and `removeDataPackageItem`.
+- Deleting the underlying data does NOT delete the item: it turns it `stale`. Tell the user which items
+  went stale instead of silently removing them.
+- `exportDataPackage` writes the manifest to `<packagePath>/artifacts/packages/<packageId>.json` — it is
+  **overwritten** on every export, so the file always describes the package's current contents.
 
 ### The patient tree
 
@@ -626,7 +718,7 @@ Then build the `keys` for `selectInstance` / `openInVolView` from the chosen ins
 Body: `{ "command": "<name>", "payload": { ... } }`
 
 **Response is authoritative.** The bridge waits for the renderer to actually run the command and returns:
-- Success → `{ "ok": true, "command": "...", "result": ... }`
+- Success → `{ "ok": true, "command": "...", "result": ... }`. `result` carries the command's own return value where it has one — notably the **new `assetId`** from `replaceAnalysisResult` — and is `null` for commands that only change UI state.
 - Failure → HTTP **500** with a message that includes the renderer's error (e.g. `command "labelAssign" failed: unknown label "Reviewed" — create it first with labelCreate`).
 
 **Never report a UI action as done just because you sent it.** Check the HTTP status: a 2xx means it ran; a 4xx/5xx means it did **not** take effect, and you should relay the error (and fix the cause) instead of claiming success.
@@ -668,7 +760,22 @@ Allowed commands (current whitelist):
 | `removeAnalysisResult` | `{ "category": "pmt-patient-photos-and-images", "assetId": "..." }` | Remove a file from an Analysis Results sub-folder. |
 | `createAnalysisResultNote` | `{ "category": "pmt-patient-clinical-notes-and-summary", "name": "My Note.txt", "content": "..." }` | Create a new note file in an Analysis Results sub-folder. |
 | `createAnalysisResultSpreadsheet` | `{ "category": "pmt-patient-demographic-data", "name": "Sheet", "csvText": "a,b\n1,2\n", "type": "csv" }` | Create a new CSV/XLSX spreadsheet in an Analysis Results sub-folder. `type` is `"csv"` or `"xlsx"`. |
+| `replaceAnalysisResult` | `{ "category": "pmt-patient-clinical-notes-and-summary", "assetId": "<old assetId>", "name": "note.md", "content": "..." }` | **Update** an existing Analysis Results file: replace its content, and optionally its name. `name` is required — pass the current name to keep it. `assetId` must be the file's **current** id (from `/parsed/analysis-results`). **The replacement is a new managed asset, so `assetId` CHANGES** — the call returns `{ assetId, name, extension, mimeType, byteSize }` and you must use the new `assetId` from then on. |
 | `openAnalysisResults` | `{ "category"?: "pmt-patient-blood-tests", "assetId"?: "<assetId>", "name"?: "summary.xlsx" }` | Open the Analysis Results panel, select that data-type tab and scroll to + flash the file row (matched by `assetId`, else by exact `name`). Call it after writing a file so the user sees the result. Payload is optional (opens the panel on its current tab). |
+| `closeAnalysisResults` | _(none)_ | Close the Analysis Results panel. The selected tab, the filter and the last highlight are remembered (only `open` changes). |
+| `setAnalysisResultsFilter` | `{ "filter": "ct" }` | Set the panel's file-name filter (case-insensitive substring). Send `{ "filter": "" }` to clear it. Pair with `openAnalysisResults` when the user wants to *see* a subset. |
+| `createDataPackageTarget` | `{ "name": "Delivery A" }` | Create a Target. Returns the target snapshot (its `id` is what `createDataPackage` needs). |
+| `renameDataPackageTarget` | `{ "targetId": "...", "name": "Delivery B" }` | Rename a Target. |
+| `removeDataPackageTarget` | `{ "targetId": "..." }` | Delete a Target **and all of its packages/items**. Confirm first. |
+| `createDataPackage` | `{ "targetId": "...", "name": "Baseline" }` | Create a Package inside a Target. Returns the package snapshot. |
+| `renameDataPackage` | `{ "packageId": "...", "name": "Week 8" }` | Rename a Package. |
+| `removeDataPackage` | `{ "packageId": "..." }` | Delete a Package and its items (the referenced data is untouched). Confirm first. |
+| `addDataPackageItem` | `{ "packageId": "...", "ref": { "kind": "patient", "entityId": "..." } }` | Add one item. Returns `{created, duplicate, item}` — see "Data Packaging" for the per-`kind` ref shapes. |
+| `removeDataPackageItem` | `{ "itemId": "..." }` | Remove one item from its package (`itemId` comes from `/api/frontend/packaging`). |
+| `exportDataPackage` | `{ "packageId": "..." }` | Expand the package in the main process and write its manifest to `<packagePath>/artifacts/packages/<packageId>.json`. Returns `{ manifestPath, fileCount, warningCount }`. Fails if the package has no items. |
+| `openDataPackaging` | `{ "packageId"?: "...", "itemId"?: "..." }` | Open the Data Packaging panel and select that package; with `itemId` it also scrolls to + flashes that row (use it right after adding an item). Payload optional (opens on the current selection). |
+| `closeDataPackaging` | _(none)_ | Close the panel. The selected package and filter are remembered. |
+| `setDataPackagingFilter` | `{ "filter": "ct" }` | Set the panel's item filter (matches the item name and its parent path). `""` clears it. |
 | `showInFolder` | `{ "keys": [...] }` **(preferred)** or `{ "path": "/abs/path" }` | Reveal in OS file manager. **Always prefer `keys`** — the bridge resolves the real path (instance `evidence:` ref, or the patient/study/series source root) from the authoritative store. Only fall back to `path` if you have a path that is not in the parsed data; even then, copy it verbatim from a previous bridge response, never retype it (CJK / lookalike characters can silently break `path`). |
 
 ### `selectInstance` vs `openInVolView` — which to use
@@ -735,7 +842,18 @@ Both render the chosen instance, but they target different windows. Pick based o
 | "what's in Analysis Results?" | `GET /api/frontend/parsed/analysis-results`. |
 | "add this file to Analysis Results → Photos and Images" | `addAnalysisResults { category: "pmt-patient-photos-and-images", paths: [...] }`. |
 | "create a note under Analysis Results → Clinical Notes" | `createAnalysisResultNote { category: "pmt-patient-clinical-notes-and-summary", name, content }`. |
+| "update / rewrite that summary file" / "rename it" | `replaceAnalysisResult { category, assetId, name, content }` — read the current `assetId` from `/parsed/analysis-results` first, and use the **new** `assetId` it returns. |
+| "delete that summary file" | `removeAnalysisResult { category, assetId }` (confirm first — destructive). |
+| "read the file I saved into Analysis Results" | build `asset:<assetId>` from `/parsed/analysis-results`, then `POST /api/frontend/file/resolve` → read `file.path`. |
 | "show me that summary file in Analysis Results" | `openAnalysisResults { category, name }` (or `assetId`) — opens the panel, selects the tab and flashes the row. |
+| "close that panel" / "only show files named X in the panel" | `closeAnalysisResults` / `setAnalysisResultsFilter { filter: "X" }` (then `openAnalysisResults` if it was closed). |
+| "what's in Data Packaging?" / "what am I about to deliver?" | `GET /api/frontend/packaging` → `targets[].packages[]` with live names, `staleCount` and `fileCount`. |
+| "make a delivery for site X" / "start a new package" | `createDataPackageTarget { name }` → `createDataPackage { targetId, name }`. |
+| "put this patient/series/timepoint in the package" | `addDataPackageItem { packageId, ref }` — build the ref from the tree node (see the ref table). |
+| "is that already in the package?" | `addDataPackageItem` answers `{ created: false, duplicate: true }`; or read `/api/frontend/packaging` and compare `itemId`s. |
+| "export the package" / "produce the delivery manifest" | `exportDataPackage { packageId }` → `manifestPath` + `fileCount`. |
+| "show me the package panel" / "which package is selected?" | `openDataPackaging { packageId, itemId? }`; read `ui.dataPackaging` from `/api/frontend/ui/state` to verify. |
+| "remove that item from the package" / "delete this target" | `removeDataPackageItem { itemId }` / `removeDataPackageTarget { targetId }` — both destructive, confirm first. |
 | "what category files does this patient have?" | `GET /api/frontend/parsed/categories` → `categories[patientKey]`. |
 | "what folders are loaded?" / "where is this patient's data on disk?" | `GET /api/frontend/project/source-roots`; map `patient.root` → `canonicalPath`. |
 | "what am I looking at?" / "which file do I have open?" / "do you see the PDF I opened?" | `GET /api/frontend/current` → `lookingAt` (`module-tab` = a non-DICOM file is in front, `volview` = the DICOM viewer is). Never answer this from `/volview/current`. |
