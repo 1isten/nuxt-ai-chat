@@ -9,13 +9,16 @@ This skill lets you interact with the host application's frontend while it is ru
 
 - Statistics or summaries of what they have parsed/loaded (patient/study/series/instance counts, modality breakdown, etc.)
 - Listing patients, studies, or series currently visible in the viewer
-- Listing **manual (non-DICOM) patients**, the ten per-patient **data types** (Demographic Data / Clinical Notes / Summary / Photos and Images / Diagnosis / Blood Tests / Pathology Reports / Procedures / Immunization / Medication / Other), the patient-independent **Analysis Results** tree, and **Other Files**
+- Listing **manual (non-DICOM) patients**, the **10 per-patient data types** (see the list in "Project model & data keys" below — do not guess them), the patient-independent **Analysis Results** panel, and **Other Files**
 - Reading the embedded VolView viewer's parent-mirrored state (mounted status, active view/data IDs, latest slicing event, current image/slice metadata)
+- Answering "what am I looking at right now" — including non-DICOM files open in a module tab that covers the image viewer
 - Performing UI actions on their behalf (open something in the embedded viewer, expand/collapse the tree, reveal a file in the OS file manager, create/merge manual patients, add files to Analysis Results)
 
 ## Terminology
 
 When the user says "viewer", "image viewer", "DICOM viewer", "current image", "current slice", "active pane", or "main viewer pane", treat that as the embedded VolView context unless they clearly mean a separate standalone window or the patient tree.
+
+**But "what am I looking at?" is a different question, and VolView does not answer it.** Non-DICOM files (PDF, xlsx, csv, …) open in third-party module UIs hosted in `<webview>`s that are laid *over* the viewer area (`position:absolute; inset:0; z-index:100`). VolView stays mounted underneath and keeps reporting its last DICOM slice, so a VolView read will confidently name the wrong file. Always use **`GET /api/frontend/current`** for "which file am I viewing / looking at / currently open". See "What the user is looking at" below.
 
 ## Authoritative source — do not read project files
 
@@ -56,6 +59,7 @@ The app moved to a **Project** model (v6 Phase 0). The bridge now exposes the fu
 
 - **Entity keys are opaque `dicomEntityId` UUIDs**, not human-readable strings. Every patient/study/series/instance response carries a `key` (== `dicomEntityId`) plus its display fields (`PatientName`, `StudyDescription`, `SeriesDescription`, `fileName`, …). Treat `key`/`dicomEntityId` as the only stable handle for navigation; map it back to the display name when talking to the user.
 - **File paths are `evidence:` refs** (`evidence:<sourceRootId>:<relativePath>`), not raw filesystem paths. Instances and Other Files expose both the `evidence:` ref (`filePath`) and its `sourceRootId` + `relativePath`. The bridge resolves these for `openInVolView` / `showInFolder` / `addAnalysisResults` automatically.
+- **The open Project** has a display name and an on-disk `.pmtaro-project` package path. Read both from `GET /api/frontend/project` (the package path never reaches the app renderer, so this is the only way to learn it). `project` is `null` when no Project is open — in that case the app shows the welcome screen and there is no tree to read.
 - **Source roots** (`GET /api/frontend/project/source-roots`) map each `sourceRootId` → `canonicalPath` (the real folder on disk). A patient's `root` field is a `sourceRootId`, **not** a path.
 - **Manual patients** are non-DICOM patients with no studies: `isManual: true`, `root: "pmtaro:manual-patients"`, empty `studies`. They are listed in `/parsed/patients` alongside DICOM patients and via `GET /api/frontend/parsed/manual-patients`.
 - **Per-patient data types** (10 fixed keys) classify non-DICOM files (notes, spreadsheets, reports, photos). Their files live in the labeling layer, not in the DICOM `studies` tree — read them via `GET /api/frontend/parsed/categories`. The 10 keys are:
@@ -195,7 +199,8 @@ All return JSON.
 |---|---|
 | `/api/frontend/health` | Liveness probe. |
 | `/api/frontend/volview/summary` | Embedded VolView parent-mirrored state: `{ mounted, activeViewID, activeViewDataID, activeViewDataIDByView, lastSlicing, lastSlicingAt, loadingUIDs }`. Use this before answering questions about the current active VolView pane/slice. |
-| `/api/frontend/volview/current` | Detailed active VolView context. Includes the summary fields plus `state`, where `state.activeView`, `state.views`, `state.layout`, `state.currentImage.metadata`, `state.currentSlice.config`, `state.currentSlice.metadata`, `state.currentSlice.dicomTags`, and `state.windowLevel` describe the current viewer pane/image/slice. Use this when the user asks what image/slice/view is currently loaded, needs current image dimensions/spacing/orientation, asks for DICOM tags from the current slice, asks about current window/level, or asks about layout/active pane. `dicomTags` is `null` for non-DICOM data. |
+| `/api/frontend/current` | **What the user is looking at right now** — the answer to "which file am I viewing?". `{ lookingAt: { kind: 'module-tab' \| 'module-window' \| 'volview', confidence, basis, file, module }, focusedWindow, moduleWindows, moduleOverlay, volview }`. See "What the user is looking at" below. |
+| `/api/frontend/volview/current` | Detailed **VolView context** — what the viewer *holds*, which is NOT necessarily what the user sees: it keeps reporting the last DICOM slice while a module tab covers the viewer. Includes the summary fields plus `state`, where `state.activeView`, `state.views`, `state.layout`, `state.currentImage.metadata`, `state.currentSlice.config`, `state.currentSlice.metadata`, `state.currentSlice.dicomTags`, and `state.windowLevel` describe the current viewer pane/image/slice. Use this when the user asks about the VolView pane itself (image dimensions/spacing/orientation, DICOM tags of the current slice, window/level, layout/active pane) — and pair it with `/current` whenever the question is "what am I looking at". `dicomTags` is `null` for non-DICOM data. |
 | `/api/frontend/volview/snapshot` | On-demand active VolView pane snapshot. Returns the active pane context plus `image` as a cropped PNG data URL, `currentSlicePixels` as compact scalar statistics/histogram for 2D views, and optionally `currentSlicePixelGrid` as downsampled scalar rows. Query options: `includeImage=false`, `includeHistogram=false`, `includePixels=true`, `maxWidth=768`, `maxHeight=768`, `bins=64`, `pixelWidth=64`, `pixelHeight=64`. Pixel grids are clamped to 128x128. Use this for visual/screenshot-style prompts, histogram/pixel-summary prompts, or bounded raw-scalar inspection. Do not print the full `image.dataURL` in chat unless explicitly needed; summarize it or omit it with `jq 'del(.image.dataURL)'`. |
 | `POST /api/frontend/volview/roi` | On-demand scalar sampling for a rectangle, polygon, or circle/ellipse on the active 2D VolView slice. Body can be `{ "roi": { "type": "rectangle", "x": 120, "y": 80, "width": 64, "height": 48 } }`, `{ "roi": { "type": "polygon", "points": [[120,80],[180,90],[160,140]] } }`, or `{ "roi": { "type": "circle", "cx": 160, "cy": 110, "radius": 32 } }`. Coordinates are zero-based current-slice image-plane indices, not screen pixels. The response includes `currentSliceRoi.roi` in index-pixel units, `currentSliceRoi.measurements` in VolView physical/world units, `measurementUnits`, `valueRange`, source image dimensions, plane axes, ROI bounds, histogram, and sampling metadata. Optional body/query fields: `includePixels=true`, `pixelWidth=32`, `pixelHeight=32`, `bins=64`, `maxSamples=262144`, `component=0`. ROI pixel grids are clamped to 128x128 and use `null` outside polygon or ellipse masks. |
 | `POST /api/frontend/volview/annotation` | Manage VolView-native overlays on the active 2D pane. Body: `{ "action": "create|update|delete|list", ... }`. Supports `type`: `ruler`, `rectangle`, `circle`, `polygon`. `create` / `update` accept `annotation` geometry in zero-based current-slice image-plane index coordinates, not screen pixels and not millimeters. `delete` uses `annotationId`. `list` returns current-image annotations. Responses include annotation `id`, `imagePlane.geometry` in index-pixel units, `measurements` in VolView physical/world units, and `measurementUnits`. Do not describe `measurements.width` / `measurements.height` as image-plane units; for a DICOM image with spacing, a rectangle created with `width:64,height:48` index pixels may display as smaller/larger physical mm dimensions in VolView. |
@@ -211,13 +216,155 @@ All return JSON.
 | `/api/frontend/parsed/analysis-results` | Patient-independent Analysis Results as `{ analysisResults: { "<categoryKey>": [{ assetId, name, extension, mimeType, byteSize }] } }`. Category keys are the same 10 keys as the per-patient data types. |
 | `/api/frontend/parsed/other-files` | Non-DICOM "Other Files" as `{ files: { "<extension>": [{ name, path, sourceRootId, relativePath }] } }`. `path` is an `evidence:` ref. |
 | `/api/frontend/parsed/categories` | Per-patient category files as `{ categories: { "<patientKey>": { "<categoryKey>": { "<evidenceRef>": { name, type } } } } }`. Only patients that actually have category files appear. |
+| `/api/frontend/parsed/timeline` | Per-patient timeline as `{ timeline: { "<patientKey>": PatientTimelineSnapshot } }`, keyed by the **same `dicomEntityId` as `/parsed/patients`**. Each snapshot holds `enrollmentDate`, `labels` (`"YYYY-MM-DD" -> "Baseline"`), `annotations` (`[{ ref, date, datePrecision, position }]` — the date assigned to one non-DICOM file; `ref` is the same `evidence:`/`asset:` key used as the file key under `labeling.labelDetails`), `labeledTimepoints`, `anchors`, `outcomes`, `visitRecords`, and `followUp`. Read-only. Use it to answer "when was this file taken", "what is this patient's baseline", or to order a patient's non-DICOM files on the time axis. |
 | `/api/frontend/project/source-roots` | `{ sourceRoots: [{ sourceRootId, canonicalPath, displayName, kind, status, addedAt, lastScannedAt }] }`. Use to map a patient's `root` (`sourceRootId`) to its real folder path. |
-| `/api/frontend/labeling/definitions` | Global label definitions: `{ labels: { "LabelName": "#hexcolor", ... }, systemLabels: [ ... ] }`. `systemLabels` are the reserved per-patient category labels — do not rename/recolor/delete them. |
+| `/api/frontend/project` | The **current Project** plus its source roots: `{ project: { projectId, name, packagePath, state, projectSessionId, projectEpoch } \| null, sourceRoots: [...] }`. `packagePath` is the absolute path of the `.pmtaro-project` package on disk (it is deliberately never sent to the renderer, so this endpoint is the only way to learn it). `project` is `null` when no Project is open. |
+| `/api/frontend/tree` | **The patient tree in the order the user sees it.** One ordered, multimodal tree: per patient, DICOM studies and non-DICOM timepoint bundles interleaved on the date axis, plus patient-level branches (e.g. Demographic Data) and the "Other Files" section. Every node carries the exact `keys` tuple the dispatch commands take. Query: `patientKey=<key>` (one patient), `files=false` (structure only — no file leaves, branches keep an honest `hasChildren`), `visible=true` (only what is currently expanded, i.e. what the user can see right now). Response `{ nodes, rootIds, patientKeys, meta }`. **Start here for anything tree-shaped.** See "The patient tree" below. |
+| `POST /api/frontend/file/resolve` | Turn data-file refs into **real filesystem paths**. Body `{ "ref": "evidence:<sourceRootId>:<relativePath>" }` or `{ "ref": "asset:<assetId>" }` → `{ file: { ref, path, name, exists, kind, byteSize, refType, error } }`. Batch form: `{ "refs": [ ... ] }` (max 200) → `{ files: [ ... ] }`. `path` is absolute and already realpath-resolved; `exists:false` means the file is missing/moved (for `evidence:` refs a best-effort intended path is still returned so you can say *where* it should be). Non-refs (`/abs/path`) are rejected. |
+| `/api/frontend/ui/state` | Frontend panel state: `{ ui: { analysisResults: { open, category, highlight }, dataPackaging: { open, selectedPackageId, filter, highlight } } }`. Use this to confirm a panel actually opened/selected what you asked for, instead of assuming. Also present under `/state` as `ui`. |
+| `/api/frontend/labeling/definitions` | Global label definitions: `{ labels: { "LabelName": "#hexcolor", ... }, systemLabels: [ ... ] }`. `systemLabels` are the 10 reserved per-patient category labels — do not rename/recolor/delete them. |
 | `POST /api/frontend/labeling/query` | Query label assignments. Body: `{ "root": "<sourceRootId>", "keys": ["patientKey", ...] }` → `{ root, keys, labels: ["LabelA", ...] }`. Body `{ "root": "<sourceRootId>" }` (no keys) → `{ root, assignments: { "<dicomEntityId>": ["LabelA"] } }`. Body `{}` → `{ labels, systemLabels }` (all definitions). |
-| `/api/frontend/state` | Full mirror of relevant Pinia state (`parsedData`, `volview`, `volviewCurrent`, `labeling`, `project.sourceRoots`). Larger; only fetch when summaries aren't enough. |
+| `/api/frontend/state` | Full mirror of relevant Pinia state (`parsedData`, `volview`, `volviewCurrent`, `labeling`, `project.sourceRoots`, `timeline`, `tree`, `ui`). Larger; only fetch when summaries aren't enough. `parsedData` is the *raw* store projection (every patient/study/series/instance plus category files), whereas `/tree` is the same data arranged as the user's ordered tree — prefer `/tree` unless you need the raw shape. |
 | `/api/frontend/ui/commands` | Lists allowed UI command names. |
 
 `patientKey`, `studyKey`, and `seriesKey` are **opaque `dicomEntityId` UUIDs** (not names). They are URL-safe but URL-encode them anyway with `--data-urlencode` or `jq -sRr @uri` when interpolating.
+
+### What the user is looking at
+
+`GET /api/frontend/current` is the **only** correct source for "which file am I viewing / looking at /
+do you see the file I have open". The viewer area has two layers:
+
+- **VolView** (base layer) — DICOM instances.
+- **An embedded module overlay** (top layer) — non-DICOM files opened through a module that supports
+  embedding (`PDF Viewer`, `Excel Viewer`, …). It is a real full-area cover; VolView stays mounted
+  and keeps reporting its last slice underneath.
+
+```sh
+curl -s -H "Authorization: Bearer $FRONTEND_BRIDGE_TOKEN" \
+  "$FRONTEND_BRIDGE_URL/api/frontend/current" \
+  | jq '{lookingAt, tabs: [.moduleOverlay.tabs[] | {moduleName, fileName, active}]}'
+```
+
+`lookingAt.kind` answers it directly:
+
+| `kind` | meaning |
+|---|---|
+| `module-tab` | a non-DICOM file is in front. `lookingAt.file` = `{ name, ref, absolutePath, patientName }`, `lookingAt.module` = `{ id, displayName }`. **This is the case a VolView-only read gets wrong.** |
+| `module-window` | the user is in a *separate* module window (a module without embed support, or "pop out"). `lookingAt.file.absolutePath` is that window's file. |
+| `volview` | no module tab is covering the viewer, so the VolView state is what they see. |
+
+Every answer carries `basis` (why) and `confidence`, plus the raw inputs —
+`moduleOverlay` (all open tabs, which is `active`, whether the cover is `visible` or the user
+`collapsed` it), `moduleWindows`, `focusedWindow` — so you can explain or double-check it. `volview`
+is reported in **all** cases: it is useful context ("the DICOM behind the PDF is at slice 42"), but it
+is never the answer to the question.
+
+Rules:
+
+- **Never answer "what am I looking at" from `/volview/current` or `/volview/summary` alone.** They
+  describe the base layer, and they will name the DICOM instance even while a PDF covers it.
+- **Never answer it from the patient tree's selected row either.** Clicking a branch to expand or
+  collapse also moves the tree's selection without changing what is being viewed, and a file's row
+  stays selected after the user switches tabs or reveals VolView. The tree tells you what the user
+  *last clicked*, not what they are *looking at*. (This is why the bridge does not expose a
+  selection-based guess.)
+- The user being in the **chat window** is reported by `focusedWindow: "chat"` but is deliberately
+  NOT what `lookingAt` returns — asking you a question always focuses the chat, so it would otherwise
+  always win.
+- A DICOM click reveals VolView (`moduleOverlay.visible: false`, `collapsed: true`); the tabs stay
+  alive. So `moduleOverlay.tabs` being non-empty does **not** mean the user is looking at one of them —
+  only `visible` does.
+- To act on what they are looking at: `lookingAt.file.absolutePath` is already resolved (read it
+  directly), and `lookingAt.file.ref` is the tree ref if you need the tree side.
+- To ask what they see *in the image*, use `/volview/snapshot` or `/volview/current` — and if
+  `lookingAt.kind` is `module-tab`, say so, because the VolView pixels are then hidden behind a module.
+
+### The patient tree
+
+`GET /api/frontend/tree` is the **canonical read for tree-shaped questions**. It returns a flat
+`nodes` array in display order (pre-order: a parent always precedes its children), so you can read it
+top to bottom without recursing.
+
+```sh
+curl -s -H "Authorization: Bearer $FRONTEND_BRIDGE_TOKEN" \
+  "$FRONTEND_BRIDGE_URL/api/frontend/tree" | jq '.nodes[] | {slot, keys, name}'
+```
+
+Node fields:
+
+| field | meaning |
+|---|---|
+| `slot` | row type — see the table below |
+| `keys` | **the exact tuple to pass to `expand` / `collapse` / `selectInstance` / `labelAssign` / a package item ref** |
+| `name` | display name, composed as the UI shows it (study/series names get ` · <date>` / ` #<number>`, timepoints get ` · <label> · Day +N`) |
+| `level` | 1 patient · 2 study/timepoint/patient-level branch · 3 series/file/meta · 4 instance |
+| `parentId` / `childIds` | wiring between nodes (`id` is a stable handle derived from `keys`; use `keys`, not `id`, for commands) |
+| `expanded` | current UI expansion flag |
+| `hasChildren` | whether the node can be expanded (honest even with `files=false`) |
+| `dicomEntityId` | entity the label system keys on; `null` where there is none |
+| `assignedLabels` | labels on this node, **including** the reserved data-type labels (`[]` where the node has no entity) |
+
+Slots and their extra fields:
+
+| slot | keys | extra fields |
+|---|---|---|
+| `patient` | `[patientKey]` | `PatientName`, `PatientID`, `root` (a **sourceRootId**), `isManual`, `enrollmentDate` |
+| `pmt-patient-level` | `[patientKey, dataTypeKey]` | `dataType` — a header branch, **not** on the time axis |
+| `pmt-patient-level-file` | `[patientKey, dataTypeKey, ref]` | `dataType`, `typeLabel`, `ref`/`filePath` |
+| `study` | `[patientKey, studyKey]` | `StudyInstanceUID`, `StudyDescription`, `StudyID`, `StudyDate`, `date` (normalized), `datePrecision` |
+| `series` | `[patientKey, studyKey, seriesKey]` | `SeriesInstanceUID`, `Modality`, `SeriesDescription`, `SeriesNumber` |
+| `instance` | `[patientKey, studyKey, seriesKey, instanceKey]` | `SOPInstanceUID`, `InstanceNumber`, `fileName`, `filePath` (ref), `sourceRootId`, `relativePath` |
+| `timepoint` | `[patientKey, "tp\|<YYYY-MM-DD>"]` (or `"tp\|unassigned"`) | `timepointKey`, `timepointLabel`, `date`, `datePrecision`, `offsetDays` (relative to enrollment) |
+| `pmt-timepoint-meta` | `[patientKey, timepointKey]` | `metaLabel`, `metaKey`, `text` — one inline structured fact |
+| `pmt-timepoint-file` | `[patientKey, timepointKey, ref]` | `dataType`, `typeLabel`, `ref`/`filePath` |
+| `other-files` / `file-type` / `file` | `["other-files"]` / `["other-files", ext]` / `["other-files", ext, path]` | `extension`, `ref`/`filePath`, `sourceRootId`, `relativePath` |
+
+Rules that follow from how the tree is built:
+
+- **Patient-level branches are not on the time axis.** Only data types in the patient-level set
+  (`pmt-patient-demographic-data`) get a header branch; the other nine are *timeline* data types, so
+  their files appear as `pmt-timepoint-file` leaves under the date they were annotated with. Do not
+  tell the user a note is missing just because it is not under a "Clinical Notes" branch.
+- **A timepoint exists only when it has content**: files with that annotated date, or a label
+  (`timeline.labels`) that marks the date. Files with no date land in the `tp|unassigned` bundle,
+  which always sorts last.
+- **Same-date ordering** is DICOM study → non-DICOM timepoint. Dates sort ascending.
+- **Outcome events are not tree nodes.** They exist only on the time axis in the timeline views;
+  read them from `/api/frontend/parsed/timeline` → `outcomes`.
+- A collapsed branch is still returned by default — `visible=true` is the filter for "what the user
+  can actually see". The `tree` block of `/state` carries the raw expansion maps
+  (`patientCategoryExpansion`, `timepointExpansion`) if you need them directly.
+
+**The way to act on something you found:** take its `keys` from the tree, then dispatch. `expand` /
+`collapse` accept **every** slot above, including the synthetic `timepoint`, `pmt-patient-level`,
+`pmt-timepoint-file` and `other-files` nodes — so you can reveal the item you are about to name.
+
+### Reading the actual files (leaf nodes)
+
+Tree leaf items are files, but the bridge reports them as **refs**, not paths, because Project files are addressed indirectly:
+
+- `evidence:<sourceRootId>:<relativePath>` — a file inside a registered Source Root (DICOM instances, and anything else that lives on disk under a root).
+- `asset:<assetId>` — a managed copy inside the Project (`<packagePath>/artifacts/managed/<sha256>.<ext>`): Analysis Results files, files added with "Add files as…", and label attachments.
+
+Refs are what you get from instance `filePath`, from `/parsed/other-files` `path`, and as the **keys of** `labeling.labelDetails["<dicomEntityId>|<dataTypeKey>"].files` (equivalently the keys under each patient in `/parsed/categories`). To read a file's contents, resolve the ref first:
+
+```sh
+curl -s -H "Authorization: Bearer $FRONTEND_BRIDGE_TOKEN" \
+  -H "Content-Type: application/json" \
+  -X POST \
+  -d '{"ref":"asset:<assetId>"}' \
+  "$FRONTEND_BRIDGE_URL/api/frontend/file/resolve"
+# -> { "file": { "ref": "...", "path": "/abs/path/file.txt", "name": "file.txt",
+#                "exists": true, "kind": "file", "byteSize": 1234,
+#                "refType": "asset", "error": null } }
+```
+
+Then open `file.path` with your own file tools.
+
+- Batch with `{"refs":[...]}` (max 200) instead of one request per file when summarising a patient or a whole project.
+- `exists:false` is the stale-reference case: the item is still in the Project but the file is gone. Report it as missing — never claim you read it. For `evidence:` refs, `path` still shows the expected location.
+- Do not assemble paths yourself from `/project/source-roots` + `relativePath`: a managed (`asset:`) file has no Source Root at all, and roots can be re-registered.
+- Text formats (`.txt`, `.md`, `.csv`, `.json`) are meant to be read directly. For binary formats (`.dcm`, `.xlsx`, `.png`) do not interpret raw bytes — resolve the path, or use the app itself (`selectInstance` / `openInVolView` for images, the numeric `/volview/*` endpoints for pixels).
 
 ### ROI and annotation reporting rules
 
@@ -490,8 +637,8 @@ Allowed commands (current whitelist):
 |---|---|---|
 | `selectInstance` | `{ "keys": [patient, study, series, instance] }` | **Render this instance in the main app window** (the embedded viewer). Internally: expands ancestor rows in the patient/study/series tree if they are collapsed, then marks this instance as the recently-clicked thumbnail — which causes the main window's viewer pane to load that series at the chosen slice. This is the in-app "highlight / view this slice" action. |
 | `openInVolView` | `{ "keys": ["patientKey", "studyKey?", "seriesKey?", "instanceKey?"] }` | Opens the (deepest resolvable) instance in a **separate, standalone viewer window**. If `keys` ends at a series/study/patient, the first instance underneath is opened. The `newWindow` flag is implicit — do not send it. |
-| `expand` | `{ "keys": [...] }` | Expand the patient/study/series at this path in the tree (without highlighting anything). |
-| `collapse` | `{ "keys": [...] }` | Collapse it. |
+| `expand` | `{ "keys": [...] }` | Expand the branch at this path (without highlighting anything). Works for **every** node returned by `/api/frontend/tree`: patient, study, series, `pmt-patient-level` (e.g. Demographic Data), `timepoint` (`tp\|<date>`), and `other-files` / its extension groups. |
+| `collapse` | `{ "keys": [...] }` | Collapse it. Same coverage as `expand`. |
 | `collapseAll` | _(none)_ | Collapse the entire tree. |
 | `toggleModuleManager` | `{ "open": true }`, `{ "open": false }`, or _(none)_ | Open, close, or toggle the main app Module Manager dialog. |
 | `volviewSetSlice` | `{ "slice": 42 }` | Set the active embedded VolView pane to an absolute zero-based slice index. Read `/api/frontend/volview/current` first and use `state.currentSlice.config.min/max` to stay in range. |
@@ -557,7 +704,7 @@ Both render the chosen instance, but they target different windows. Pick based o
 | "maximize this viewer" / "restore the view" | `volviewSetActiveViewMaximized` |
 | "play this series" / "animate the slices" / "start cine" | `volviewPlayCine` with appropriate `direction` and `fps`. |
 | "stop playing" / "pause cine" | `volviewStopCine` |
-| "describe what is visible" / "capture the current viewer" | `GET /api/frontend/volview/snapshot`; use `image.dataURL` as the image input if the runtime supports image attachments, otherwise summarize available metadata and pixel statistics. |
+| "describe what is visible" / "capture the current viewer" | `GET /api/frontend/current` first — if `lookingAt.kind` is `module-tab`, the user is looking at a module (a PDF/…), not the image. Otherwise `GET /api/frontend/volview/snapshot`; use `image.dataURL` as the image input if the runtime supports image attachments, otherwise summarize available metadata and pixel statistics. |
 | "return the image" / "show the image" / "render a preview" | `GET /api/frontend/volview/snapshot`; save the completed `image.dataURL` to a safe temp PNG file, URL-encode the local path, then return `![volview-preview](h3://localhost/file/<already-url-encoded-local-file-path>)`. Never stream the base64 data URL in Markdown. |
 | "summarize the current slice histogram" / "what is the intensity range" | `GET /api/frontend/volview/snapshot?includeImage=false&bins=64` |
 | "sample the current slice pixels" / "show a downsampled pixel grid" | `GET /api/frontend/volview/snapshot?includeImage=false&includePixels=true&pixelWidth=32&pixelHeight=32`; summarize patterns and avoid dumping all rows unless the user asks. |
@@ -575,6 +722,10 @@ Both render the chosen instance, but they target different windows. Pick based o
 | "unmark this series" / "remove the label" | `labelRemove` |
 | "add a note to this label" / "write a finding description" | `labelSetDetails` with `description`, optional `meta` and `files`. |
 | "what labels exist?" / "list available tags" | `GET /api/frontend/labeling/definitions`. |
+| "what does this patient have?" / "show me the tree" / "what's in this project?" | `GET /api/frontend/tree` (add `patientKey=<key>` for one patient, `files=false` for the branch structure only). |
+| "where is X in the tree?" / "what are the keys for this series/timepoint/file?" | `GET /api/frontend/tree` and read the node's `keys` — never invent or retype them. |
+| "what can I see right now?" / "what's expanded?" | `GET /api/frontend/tree?visible=true` (or the `tree` block of `/state` for the raw expansion maps). |
+| "expand/collapse that branch/date/patient" | `expand` / `collapse` with the node's `keys` (works for every slot, including timepoints and Other Files). |
 | "what is this item labeled as?" / "check labels on this series" | `POST /api/frontend/labeling/query` with `root` + `keys`. |
 | "show the distribution of labels" / "how many items are labeled X?" | `POST /api/frontend/labeling/query` with `root` (no keys), then aggregate. Use `bar_chart` for label distribution. |
 | "list manual patients" / "how many non-DICOM patients" | `GET /api/frontend/parsed/manual-patients` (and compare with `/parsed/patients` `isManual`). |
@@ -587,6 +738,13 @@ Both render the chosen instance, but they target different windows. Pick based o
 | "show me that summary file in Analysis Results" | `openAnalysisResults { category, name }` (or `assetId`) — opens the panel, selects the tab and flashes the row. |
 | "what category files does this patient have?" | `GET /api/frontend/parsed/categories` → `categories[patientKey]`. |
 | "what folders are loaded?" / "where is this patient's data on disk?" | `GET /api/frontend/project/source-roots`; map `patient.root` → `canonicalPath`. |
+| "what am I looking at?" / "which file do I have open?" / "do you see the PDF I opened?" | `GET /api/frontend/current` → `lookingAt` (`module-tab` = a non-DICOM file is in front, `volview` = the DICOM viewer is). Never answer this from `/volview/current`. |
+| "what's on screen / describe what I see" | `GET /api/frontend/current` first (is a module covering the viewer?), then `/volview/snapshot` **only** when `lookingAt.kind === 'volview'`. |
+| "which tabs do I have open?" / "switch back to the DICOM viewer" | `GET /api/frontend/current` → `moduleOverlay.tabs` (+ `visible`/`collapsed`). Revealing VolView is a user action (top-bar chip or clicking a DICOM item), not a bridge command. |
+| "which project is open?" / "where is this project saved?" | `GET /api/frontend/project` → `project.name` + `project.packagePath`. |
+| "read this file" / "what does this report say?" / "summarize this note" | `POST /api/frontend/file/resolve` with the leaf's ref → read `file.path` with your own file tools. |
+| "when was this taken?" / "what's this patient's baseline?" / "put these files in order" | `GET /api/frontend/parsed/timeline` (keyed by the same patient keys as `/parsed/patients`). |
+| "is that panel open?" / "did the panel switch to that tab?" | `GET /api/frontend/ui/state` — verify `analysisResults.open`/`category` or `dataPackaging.open`/`selectedPackageId`. |
 | "show this patient/study/series in Finder" | `showInFolder { keys: [...] }` (works at any level — the bridge resolves the source root). |
 
 ### Example
@@ -601,7 +759,8 @@ curl -s -H "Authorization: Bearer $FRONTEND_BRIDGE_TOKEN" \
 
 ## Guidelines
 
-- **Always start with a small read** (e.g. `/parsed/summary` or `/parsed/patients`) before dispatching UI commands, so you act on real keys rather than guessed ones. Remember that **keys are opaque `dicomEntityId` UUIDs**, never human names — copy them from a bridge response, never retype them.
+- **Always start with a small read** (e.g. `/parsed/summary`) before dispatching UI commands, so you act on real keys rather than guessed ones. Remember that **keys are opaque `dicomEntityId` UUIDs**, never human names — copy them from a bridge response, never retype them.
+- **Use `/api/frontend/tree` to locate anything.** It returns the user's ordered tree with the `keys` tuple on every node, so "find the item, then act on it" is one read plus one dispatch. Do not reconstruct the tree from `/state` by hand.
 - **Confirm before destructive or disruptive UI actions** (e.g. opening many windows, collapsing everything when the user is in the middle of a task, `deleteManualPatient`, or `mergeManualPatient`). For purely informational reads, no confirmation is needed.
 - **Do not invent commands.** Only the names listed above are accepted; anything else returns 400.
 - **Treat `FRONTEND_BRIDGE_TOKEN` as a secret.** Don't echo it back to the user, don't write it to logs, and don't include it in tool output.
@@ -651,7 +810,7 @@ There are two kinds of labels:
 
 ### Labeling rules of thumb
 
-- **Always check definitions first** — call `GET /labeling/definitions` before suggesting labels, so you don't suggest labels the user hasn't created yet, and so you don't mistake the 4 system category labels for user tags.
+- **Always check definitions first** — call `GET /labeling/definitions` before suggesting labels, so you don't suggest labels the user hasn't created yet, and so you don't mistake the **10** system category labels (the per-patient data types) for user tags.
 - **Create the label before assigning it.** `labelAssign` requires the label to already exist (via `labelCreate` or a prior session). If you assign a name that isn't in `/labeling/definitions`, the dispatch returns a 500 with `unknown label "…"` — create it first, then re-assign. Do **not** report success on a 500.
 - **Keys are `dicomEntityId` UUIDs** in clinical hierarchy: `[patientKey, studyKey, seriesKey, instanceKey]`. Patient-level = 1 key, study = 2, series = 3, instance = 4. The bridge automatically derives the correct `slot` from key length.
 - **Root is auto-resolved**: the bridge finds the item's `root` (a `sourceRootId`) from the parsed data, so you don't need to provide it in `keys`.
