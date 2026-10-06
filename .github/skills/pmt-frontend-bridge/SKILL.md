@@ -13,6 +13,7 @@ This skill lets you interact with the host application's frontend while it is ru
 - Building a **Data Package** (Target → Package → Item) out of tree items and Analysis Results files, and exporting it as a manifest
 - Reading the embedded VolView viewer's parent-mirrored state (mounted status, active view/data IDs, latest slicing event, current image/slice metadata)
 - Answering "what am I looking at right now" — including non-DICOM files open in a module tab that covers the image viewer
+- Reading the **contents** of their own files when they ask about them — "这份报告写了什么？", "把这几份 PDF 汇总一下", "这是扫描件，你能读吗？" — including **scanned/image PDFs with no text layer** and **photos or screenshots (PNG/JPEG)**, which both need OCR. They will not mention an endpoint, a ref, or an OCR engine; derive all of that yourself. See "PDF / scanned documents → text" below.
 - Performing UI actions on their behalf (open something in the embedded viewer, expand/collapse the tree, reveal a file in the OS file manager, create/merge manual patients, add files to Analysis Results or a package)
 
 ## Terminology
@@ -457,6 +458,66 @@ Then open `file.path` with your own file tools.
 - `exists:false` is the stale-reference case: the item is still in the Project but the file is gone. Report it as missing — never claim you read it. For `evidence:` refs, `path` still shows the expected location.
 - Do not assemble paths yourself from `/project/source-roots` + `relativePath`: a managed (`asset:`) file has no Source Root at all, and roots can be re-registered.
 - Text formats (`.txt`, `.md`, `.csv`, `.json`) are meant to be read directly. For binary formats (`.dcm`, `.xlsx`, `.png`) do not interpret raw bytes — resolve the path, or use the app itself (`selectInstance` / `openInVolView` for images, the numeric `/volview/*` endpoints for pixels).
+
+### PDFs, scans and photos → text (`/extract`)
+
+**The user does not need to know any of this.** They will not say `/extract`, `ref`, "OCR", or "text layer" — they will say things like 「这份报告里写了什么？」「这几个 PDF 帮我汇总一下」「这是扫描件，你能读吗？」. Treat any request about the *content* of a PDF, scan, photo of a report, or other opaque document as this capability, find the files yourself (`/api/frontend/tree`, `/parsed/other-files`, the per-patient category files, or whatever `/api/frontend/current` says they are looking at), resolve the refs yourself, and just report the content. Never ask the user for an endpoint, a ref, an engine, or a dpi.
+
+A resolved path is not readable text when the file is a PDF or an image. Do **not** try to read those bytes yourself, and do not assume a PDF is either "digital" or "scanned": one page can have both. Extract instead — `/extract` accepts a PDF, PNG or JPEG, and decides per page whether to use the text layer, OCR, or both:
+
+```sh
+curl -s -H "Authorization: Bearer $FRONTEND_BRIDGE_TOKEN" \
+  "$FRONTEND_BRIDGE_URL/api/frontend/extract/status"
+# -> { "ocr":     { "installed": true, "ready": true, "engines": ["newbee-ocr-cli"], "reason": "" },
+#      "textLayer": { "available": true, "provider": "pdfkit",
+#                     "detail": "PDFKit (macOS, honours ActualText)", "reason": "" } }
+
+curl -s --max-time 900 -H "Authorization: Bearer $FRONTEND_BRIDGE_TOKEN" \
+  -H "Content-Type: application/json" -X POST \
+  -d '{"ref":"asset:<assetId>"}' \
+  "$FRONTEND_BRIDGE_URL/api/frontend/extract"
+# -> { "result": { "ref": "...", "path": "...", "sourceKind": "pdf", "pageCount": 1, "chars": 14,
+#                  "text": "姓名：test1\n测试文本\n66",
+#                  "pages": [ { "page": 1, "source": "mixed", "fromTextChars": 2,
+#                               "fromOcrChars": 12, "droppedCoveredLines": 1 } ],
+#                  "textPath": "<packagePath>/artifacts/text/<sha256>.txt",
+#                  "ocrRan": true, "ocrEngine": "newbee-ocr-cli", "ocrDpi": 200,
+#                  "avgConfidence": 0.983, "textProvider": "pdfkit", ... } }
+```
+
+How it behaves:
+
+- **Per page, the two sources are merged by geometry.** The PDF's own text layer is exact where it exists; OCR covers everything else. So a born-digital report yields its exact digits and never runs OCR at all (`ocrRan:false`, worth reporting — it means the text is not a recognition result), a scanned page yields OCR text, and a page that is both yields both.
+- `pages[].source` is `text` | `ocr` | `mixed` | `empty` — say which one you got rather than implying everything was read the same way.
+- Text is also cached to `textPath` (plus a `.json` sidecar). That is an ordinary file: re-read it with your own tools, or `grep`/`sed` a slice instead of re-extracting. Repeating the same call returns `cached:true` in milliseconds. Pass `{"force":true}` to redo it.
+- Batch with `{"refs":[...]}` (**max 20**, run sequentially) instead of shell-looping: each document may run OCR, which is CPU bound and spawns native processes.
+- **For more than a couple of files — or whenever one long request is risky — queue the work instead of waiting for it.** Add `"background": true`:
+  ```sh
+  curl -s -H "Authorization: Bearer $FRONTEND_BRIDGE_TOKEN" -H "Content-Type: application/json" -X POST \
+    -d '{"refs":["asset:<id1>","asset:<id2>"],"background":true}' \
+    "$FRONTEND_BRIDGE_URL/api/frontend/extract"
+  # -> { "jobs": [ { "ref": "asset:<id1>", "jobId": "extract-..." }, ... ],
+  #      "poll": "/api/frontend/extract/jobs/<jobId>" }
+
+  curl -s -H "Authorization: Bearer $FRONTEND_BRIDGE_TOKEN" \
+    "$FRONTEND_BRIDGE_URL/api/frontend/extract/jobs/extract-..."
+  # -> { "job": { "state": "queued|running|completed|failed", "percent": 40,
+  #               "error": null, "result": { ...same result object as above... } } }
+  ```
+  It returns in milliseconds. `state:"queued"` is normal and expected — the runner is strictly sequential, so in a batch the second job waits for the first. Poll until every job leaves `queued`/`running`; a `completed` job **keeps its result**, so a late or repeated poll returns the text without redoing the OCR. Tell the user how many are done rather than going silent, and prefer this over a longer timeout: if a request is cut off mid-batch, the files that never started are simply never queued.
+- **OCR takes seconds to minutes per document.** With the foreground form use a generous `--max-time`; the work continues and caches even if the request is cut off, so a retry is cheap.
+- **Photos and screenshots work too.** The OCR engine has no raster entry point, so a PNG/JPEG is wrapped into a one-page PDF first; you do not do anything differently, but the result tells you what happened: `sourceKind:"image"`, `textProvider:"none"` (an image has no text layer, so **every** page is `source:"ocr"` and the OCR caveats below apply in full), and `imageRender` with the source size, the rendered size and a `scale`. `scale < 1` means the image was bigger than the render guard and the page was shrunk, so OCR saw fewer pixels than the file holds — mention it if the user asked for detail from a large photo. PNG (including 1-bit scans and transparency, composited onto white) and JPEG both work; anything else, including Office files and DICOM, fails with a message naming the extension rather than returning nothing.
+- `{"dpi":300}` is **not** a general accuracy win: measured on a ~205 dpi scanned lab report it changed nothing (character accuracy 98.4% at both 200 and 300) while costing ~30% more time, because the embedded image holds no more detail to recover. Leave it at the default 200 unless the source really is high resolution and the text is small.
+- **OCR error concentrates in symbols, not in the data.** On the same measurement the 11 differing characters were 8 misread arrows (`↑`/`↓` read as `1`, or dropped) plus 3 characters of footer boilerplate — every patient name, ID, date, analyte name, numeric value, unit and reference range came through exactly. On a lower-quality scan the same mechanism also drops thin-stroke CJK characters (`结果`→`果`). So when a table column looks corrupted, prefer the primary values (which survive) over derived/symbol columns, and say which parts you would not trust.
+- **Recompute a derived column instead of copying it when the copy is suspect.** A column that is a function of the others — a lab flag (`↑` high / `↓` low), a ratio, a unit conversion, a total — is both the first thing OCR mangles and the thing you can rebuild: `↑` simply means the numeric result lies outside its own reference range. So derive it from the primary values and say that you did, rather than propagating an unreadable symbol; the report itself stays trustworthy because the inputs survived.
+  ```
+  result 1284.00, reference range 0.00-35.00  ->  above the upper bound, so the flag is "high"
+  # even though the digitised flag cell came back empty, or as "1" instead of "↑↑↑"
+  ```
+  Two limits: only derive when you actually have both the value and its reference range (if the range is what is unreadable, say so and leave the flag unknown — do not invent one), and never present a derived value as if it were read off the page. Report which cells were read and which were computed.
+- **Treat OCR-derived text as recognition output, not fact.** Quote `avgConfidence` / `lowConfidenceBoxes` when they matter, and say that values read by OCR (especially digits and symbols) should be verified against the source. Text-layer content needs no such caveat.
+- `unmappedCompatChars` non-empty means the extractor produced CJK compatibility characters it could not repair (e.g. `⻔` for `门`): the text is usable but exact matching may fail — mention it rather than passing the text off as verbatim.
+- Unresolved refs fail with `404` (`stale ref`), and an unavailable OCR runtime fails with the reason from `extract/status` — check status first on a fresh machine.
 
 ### ROI and annotation reporting rules
 
