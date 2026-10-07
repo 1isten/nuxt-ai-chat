@@ -102,7 +102,14 @@ export default defineEventHandler(async (event) => {
   // re-paid on each turn, and this machine's prefill is slow enough that a ~30k
   // token skill produces no answer at all. Large skills stay reachable through the
   // CLI's own <available_skills> catalogue + skill tool, which loads them on demand.
-  const eagerSkills = selectEagerSkills(enabledFull, isOllamaProvider(provider));
+  //
+  // Cloud models inline NOTHING and use the catalogue for everything. A catalogue entry
+  // arrives with the CLI's "invoke the matching Skill before answering" instruction, which
+  // is what actually makes a model follow a skill; a ~130 KB block of inlined skill text
+  // carries no such framing and a strong model ignores it. Measured: a cloud session with
+  // both bridge skills enabled never noticed `/api/frontend/extract` and hand-rolled an
+  // extraction pipeline instead, although the same text sat in its system message.
+  const eagerSkills = isOllamaProvider(provider) ? selectEagerSkills(enabledFull, true) : [];
   const skillsSystemFragment = renderSkillsSystemMessage(eagerSkills);
   // A skill is either inlined above OR reachable through the CLI's on-demand
   // catalogue — never both. Advertising an inlined skill as a tool to invoke hands

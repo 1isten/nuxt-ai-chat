@@ -12,10 +12,10 @@ labels, Data Packaging or ROI — those live in a separate skill that is *not* l
 If a request needs one of them, say plainly that you cannot do it here (and that the user can do it in the
 UI, or enable the full bridge skill) instead of guessing at endpoint names.
 
-**This skill is already loaded — do not invoke a skill tool, and do not announce what you are about to
-do.** There is nothing to fetch and nothing to load: the commands below are the whole answer. Never end a
-turn with a statement of intent ("let me read the reports", "I'll use the report-text skill"): if you say
-you are going to do something, do it in the same turn by calling the tool.
+**Do not go looking for this skill's files on disk, and do not announce what you are about to do.** There is
+nothing to fetch: the commands below are the whole answer. Never end a turn with a statement of intent ("let
+me read the reports", "I'll use the report-text skill"): if you say you are going to do something, do it in
+the same turn by calling the tool.
 
 **The user will not say any of this.** They will not mention an endpoint, a `ref`, "OCR", a "text
 layer", a dpi or a category — they will say 「这份报告里写了什么？」「这几个 PDF 帮我汇总一下」「扫描件你能读
