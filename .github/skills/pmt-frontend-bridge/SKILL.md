@@ -31,8 +31,16 @@ Concretely:
 - **Do not** `view`, `grep`, or `glob` source files in the working directory to answer such questions. Files like `app/stores/parsing.ts`, `app/components/TreePatients.vue`, `server/index.ts`, `server/frontend-bridge.ts`, etc. describe the *implementation* of the viewer, not the user's live data. Reading them will not tell you how many patients are loaded.
 - **Do not** guess patient/study/series keys, file paths, or counts. Always fetch them from the bridge first.
 - If `FRONTEND_BRIDGE_URL` is unset (e.g. the viewer is not running), say so plainly instead of falling back to source-code inspection.
+- **Never search the working directory, config files or `.env` for a token, a URL or a port.** Nothing useful
+  is there, the token is minted fresh for each app session, and a search that cannot succeed will consume the
+  entire turn.
 
 The only legitimate reason to read project source files in the same conversation is if the user explicitly asks a code/development question unrelated to their loaded data.
+
+**You are running inside this application.** Its panels and tabs are not something you launch, click or
+automate from outside: every UI action available to you is a bridge command the app itself executes
+A tab label the user says out loud ("Blood Tests" in English, or a Chinese equivalent) is a `category` argument, not a place you navigate to.
+argument, not a place you navigate to.
 
 ## How it works
 
@@ -292,6 +300,8 @@ NOT part of the patient tree. A complete round trip:
    already exist (tree refs and real paths both work).
 2. **Show** — `openAnalysisResults {category, name}` (or `assetId`). It opens the panel, selects the tab,
    clears the filter and flashes the row.
+   Say what the user can now see, **in their words and their language** — which panel and tab it
+   landed in — not which command you ran.
 3. **Verify** — `GET /api/frontend/ui/state` → `ui.analysisResults` (`open`, `category`, `filter`). Do not
    claim the user can see something without checking.
 4. **Read back** — `GET /api/frontend/parsed/analysis-results` for the `assetId`, then build
@@ -303,6 +313,28 @@ NOT part of the patient tree. A complete round trip:
 
 Text formats (`.txt`, `.md`, `.csv`) round-trip faithfully through `content` / `csvText`. For binary
 files, prefer `addAnalysisResults` with a real path so the app makes the managed copy.
+
+**Building a CSV from extracted text.** Write it with a quoted heredoc — `cat > /tmp/x.csv <<'EOF' … EOF` — so
+Chinese, commas and quotes go in as-is with no JSON escaping, then import that path with
+`addAnalysisResults`. **Do not write a script to parse the reports into it: you are the parser.** Quote any
+field containing an ASCII comma (a patient name like `ZHOU, ZIQIN` is the common case; left unquoted it shifts
+every later column of that row by one, silently). With `addAnalysisResults` the row name becomes the file's
+**basename**, which is what `openAnalysisResults` then matches. Keep derived columns consistent with their
+inputs — a flag column must never contradict the values beside it.
+
+**Report-text work has a companion skill.** Reading PDFs, scans and photos and turning several reports into
+a summary table is a long procedure with its own traps. It is documented in the
+`pmt-frontend-bridge-report-text` skill — load it when the user asks for the *contents* of their reports or
+wants them tabulated. That skill must be **enabled in this app** to be loadable; if it is not in the list, tell
+the user to enable it.
+
+Translate what the user says into a command instead of investigating how:
+
+| the user says | you do |
+|---|---|
+| 「汇总成一张表」「生成 CSV」 | build the CSV yourself (heredoc), then `addAnalysisResults` |
+| 「存进 / 导入 / 保存到 <标签>」 | `addAnalysisResults`, or `createAnalysisResultSpreadsheet` for a string |
+| 「打开面板」「定位到它」 | `openAnalysisResults` |
 
 ### Data Packaging — Target → Package → Item
 
@@ -414,6 +446,13 @@ Slots and their extra fields:
 
 Rules that follow from how the tree is built:
 
+- **Narrow the read.** `?slots=<comma list>` keeps only those row types plus the ancestors that give them
+  meaning; `?patientKey=` and `?files=false` narrow further. This is not a nicety: on a project with DICOM
+  the unfiltered tree is megabytes, because every instance is a node — measured 1.34 MB (~370k tokens) for
+  3 patients x 2 studies x 3 series x 150 instances, versus ~1.9 KB narrowed. `meta.nodeCount` against
+  `meta.totalNodeCount` says how much was filtered.
+- An unknown `patientKey` is a **404**, and a `dicomEntityId` passed as `patientKey` is a **400** whose
+  message names the correct key. An empty `nodes` list never means "no such patient".
 - **Patient-level branches are not on the time axis.** Only data types in the patient-level set
   (`pmt-patient-demographic-data`) get a header branch; the other nine are *timeline* data types, so
   their files appear as `pmt-timepoint-file` leaves under the date they were annotated with. Do not
