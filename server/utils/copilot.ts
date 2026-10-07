@@ -736,7 +736,24 @@ interface RunArgs {
   skillsSystemFragment?: string;
 }
 
-const SYSTEM_MESSAGE_DEFAULT = `You are a knowledgeable and helpful AI assistant with access to file-system tools.
+const SYSTEM_MESSAGE_DEFAULT = `You are the assistant embedded in the PMTaro Viewer desktop application — a clinical
+data workstation. You help the user with THEIR DATA: the patients, studies, files, reports and analysis
+results loaded in their open Project.
+
+WHAT YOU ARE, AND WHAT YOU ARE NOT:
+- The working directory holds this application's own source code. That is the application, NOT the user's
+  data. Reading or searching it cannot tell you what is in the user's Project, and in a packaged build it
+  is not there at all.
+- For anything about the user's data, the Frontend Bridge HTTP API is the only source of truth; the
+  available skills describe how to use it. Never guess patient names, keys, counts or file contents.
+- You are running INSIDE this application. Its panels and tabs are not something you launch, click or
+  automate: every UI action available to you is a bridge command that the app itself executes.
+- Do not go looking for a credential, a port, a skill file or a configuration file on disk. Anything the
+  skills need is already in your environment or your context.
+- If the bridge is unavailable, say so plainly instead of falling back to inspecting the code.
+- The exception is a deliberate development question ("how does X work in this codebase?", "fix this
+  bug"): then reading and editing source is exactly right.
+
 Your goal is to provide clear, accurate, well-structured responses.
 
 FORMATTING RULES (CRITICAL):
@@ -1057,7 +1074,15 @@ function translateEvent(event: SessionEvent, state: AdapterState): UIMessageChun
  *  a config change and recreate the underlying Copilot session. */
 const _lastConfigByChat = new Map<string, string>();
 
-function configFingerprint(model: string, provider?: ProviderConfigClient, offline?: boolean, reasoningEffort?: ReasoningEffortValue, disabledSkills?: string[], skillsSystemFragment?: string): string {
+function configFingerprint(
+  model: string,
+  provider?: ProviderConfigClient,
+  offline?: boolean,
+  reasoningEffort?: ReasoningEffortValue,
+  disabledSkills?: string[],
+  skillsSystemFragment?: string,
+  skillDirectories?: string[],
+): string {
   const skills = disabledSkills?.length ? [...disabledSkills].sort() : null;
   return JSON.stringify({
     model,
@@ -1066,6 +1091,12 @@ function configFingerprint(model: string, provider?: ProviderConfigClient, offli
     reasoningEffort: reasoningEffort ?? null,
     skills,
     fragment: skillsSystemFragment || null,
+    // Must be part of the fingerprint: the CLI advertises the skills it is given a
+    // directory for as tools to invoke. When that changes (a skill stops being
+    // on-demand and starts being inlined instead), resuming the old session would
+    // keep the stale "invoke the Skill tool" advertising alive, and the model keeps
+    // announcing an invocation instead of running the commands it already has.
+    skillDirectories: skillDirectories?.length ? [...skillDirectories].sort() : null,
   });
 }
 
@@ -1073,7 +1104,7 @@ export async function runChatTurn(args: RunArgs): Promise<Response> {
   const assistantMessageId = crypto.randomUUID();
   const state = newState(assistantMessageId);
 
-  const fingerprint = configFingerprint(args.model, args.provider, args.offline, args.reasoningEffort, args.disabledSkills, args.skillsSystemFragment);
+  const fingerprint = configFingerprint(args.model, args.provider, args.offline, args.reasoningEffort, args.disabledSkills, args.skillsSystemFragment, args.skillDirectories);
   const previous = _lastConfigByChat.get(args.chatId);
   const configChanged = previous !== undefined && previous !== fingerprint;
   _lastConfigByChat.set(args.chatId, fingerprint);

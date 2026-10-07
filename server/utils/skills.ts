@@ -146,3 +146,38 @@ export function renderSkillsSystemMessage(enabled: SkillFull[]): string {
   ).join('\n\n');
   return `The following skills are ACTIVE for this conversation. You MUST follow their instructions exactly. Skill instructions take precedence over your default behavior when they conflict.\n\n${sections}`;
 }
+
+/**
+ * Body size (in characters) at or below which a skill is still inlined for a
+ * local model. Override with `LOCAL_EAGER_SKILL_MAX_CHARS`.
+ *
+ * A local model pays for every injected character on **every** turn, and on CPU
+ * that prefill cost is what makes a large skill unusable: pmt-frontend-bridge is
+ * ~108 KB (~30k tokens), which is minutes of prefill per turn. The CLI already
+ * runs its own progressive disclosure — an `<available_skills>` catalogue
+ * carrying name/description/location plus a `skill` tool that loads the body on
+ * demand from `skillDirectories` — so a large skill does not need to be inlined
+ * to be reachable.
+ */
+export const LOCAL_EAGER_SKILL_MAX_CHARS
+  = Number(process.env.LOCAL_EAGER_SKILL_MAX_CHARS) > 0
+    ? Number(process.env.LOCAL_EAGER_SKILL_MAX_CHARS)
+    : 24_000;
+
+/**
+ * Which enabled skills to inline into the system message.
+ *
+ * Cloud models get the previous behaviour (inline everything): their context is
+ * large and their prefill is cheap. Local models inline only the small ones, and
+ * reach the rest through the CLI's on-demand catalogue. Set the budget high
+ * (`LOCAL_EAGER_SKILL_MAX_CHARS=1000000`) to restore always-inline for local
+ * models if a small model turns out not to invoke the `skill` tool.
+ */
+export function selectEagerSkills(
+  enabled: SkillFull[],
+  isLocal: boolean,
+  maxChars: number = LOCAL_EAGER_SKILL_MAX_CHARS,
+): SkillFull[] {
+  if (!isLocal) return enabled;
+  return enabled.filter((s) => s.body.length <= maxChars);
+}

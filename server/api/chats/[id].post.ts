@@ -4,10 +4,10 @@ import { eq, and } from 'drizzle-orm';
 import { z } from 'zod';
 import { db, schema } from '../../utils/db';
 import { getUserSession } from '../../utils/auth';
-import { runChatTurn, dropCopilotSession } from '../../utils/copilot';
+import { isOllamaProvider, runChatTurn, dropCopilotSession } from '../../utils/copilot';
 import { providerSchema } from '../../utils/providerSchema';
 import { createDefaultChatTitle, getFirstUserText } from '../../utils/chatTitle';
-import { SKILLS_DIR, discoverSkills, renderSkillsSystemMessage } from '../../utils/skills';
+import { SKILLS_DIR, discoverSkills, renderSkillsSystemMessage, selectEagerSkills } from '../../utils/skills';
 import { HIDDEN_SKILL_NAMES } from '../../../shared/utils/skills';
 import type { ReasoningEffortValue } from '../../../shared/utils/models';
 
@@ -98,7 +98,20 @@ export default defineEventHandler(async (event) => {
       .filter((name) => !HIDDEN_SKILL_NAMES.includes(name) && !enabledSet.has(name)),
     ...HIDDEN_SKILL_NAMES,
   ];
-  const skillsSystemFragment = renderSkillsSystemMessage(enabledFull);
+  // Local (Ollama) models inline only small skills: every injected character is
+  // re-paid on each turn, and this machine's prefill is slow enough that a ~30k
+  // token skill produces no answer at all. Large skills stay reachable through the
+  // CLI's own <available_skills> catalogue + skill tool, which loads them on demand.
+  const eagerSkills = selectEagerSkills(enabledFull, isOllamaProvider(provider));
+  const skillsSystemFragment = renderSkillsSystemMessage(eagerSkills);
+  // A skill is either inlined above OR reachable through the CLI's on-demand
+  // catalogue — never both. Advertising an inlined skill as a tool to invoke hands
+  // the model two contradictory orders ("this skill is already ACTIVE" vs the
+  // catalogue's "invoke the Skill tool BEFORE generating any other response"), and a
+  // small model resolves the conflict by announcing the invocation and stopping
+  // without running anything. The catalogue is only needed when something was
+  // deliberately left out of the system message.
+  const needsSkillCatalogue = eagerSkills.length < enabledFull.length;
 
   return await runChatTurn({
     chatId: id,
@@ -111,7 +124,7 @@ export default defineEventHandler(async (event) => {
     forceNew: truncated,
     signal: abortController.signal,
     chatTitle: newTitle,
-    skillDirectories: allSkills.length ? [SKILLS_DIR] : undefined,
+    skillDirectories: needsSkillCatalogue ? [SKILLS_DIR] : undefined,
     disabledSkills,
     skillsSystemFragment,
     onFinish: async (assistantMessages) => {
